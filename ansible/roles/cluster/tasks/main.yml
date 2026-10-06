@@ -1,0 +1,2 @@
+- name: Execute the selected operation
+  ansible.builtin.include_tasks: "{{ cluster_action }}.yml"

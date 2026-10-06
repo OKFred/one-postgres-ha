@@ -1,0 +1,8 @@
+- name: Inspect PostgreSQL hosts without changing them
+  hosts: pg_nodes
+  gather_facts: true
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: preflight
+  roles: [cluster]

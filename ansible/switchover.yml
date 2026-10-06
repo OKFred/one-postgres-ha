@@ -1,0 +1,8 @@
+- name: Switch only to an existing synchronous replica
+  hosts: core_nodes[0]
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: switchover
+  roles: [cluster]

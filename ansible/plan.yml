@@ -1,0 +1,9 @@
+- name: Run read-only preflight before displaying the plan
+  ansible.builtin.import_playbook: preflight.yml
+
+- name: Describe the deployment
+  hosts: pg_nodes
+  gather_facts: false
+  vars:
+    cluster_action: plan
+  roles: [cluster]

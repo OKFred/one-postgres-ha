@@ -1,0 +1,94 @@
+scope: {{ cluster_name }}
+namespace: /service/
+name: {{ node_name }}
+restapi:
+  listen: 0.0.0.0:{{ patroni_port }}
+  connect_address: {{ node_ip }}:{{ patroni_port }}
+  authentication:
+    username: {{ patroni_api_user }}
+ctl:
+  authentication:
+    username: {{ patroni_api_user }}
+etcd3:
+  hosts:
+{% for host in groups.core_nodes %}
+    - {{ hostvars[host].node_ip }}:2379
+{% endfor %}
+  protocol: https
+  cacert: /run/secrets/ca.crt
+  cert: /run/secrets/patroni.crt
+  key: /run/secrets/patroni.key
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 5
+    retry_timeout: 5
+    synchronous_mode: true
+    synchronous_mode_strict: true
+    synchronous_node_count: 1
+    maximum_lag_on_failover: {{ replica_max_lag_bytes }}
+    check_timeline: true
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        synchronous_commit: 'on'
+        wal_level: replica
+        wal_log_hints: 'on'
+        max_wal_senders: 16
+        max_replication_slots: 16
+        max_slot_wal_keep_size: 4GB
+        wal_keep_size: 1GB
+        max_connections: 100
+        shared_buffers: 256MB
+        work_mem: 4MB
+        maintenance_work_mem: 64MB
+        password_encryption: scram-sha-256
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+    - auth-host: scram-sha-256
+    - auth-local: scram-sha-256
+postgresql:
+  listen: 127.0.0.1,{{ node_ip }}:{{ postgres_port }}
+  connect_address: {{ node_ip }}:{{ postgres_port }}
+  data_dir: /var/lib/postgresql/data
+  pgpass: /tmp/patroni.pgpass
+  authentication:
+    superuser:
+      username: {{ postgres_user }}
+    replication:
+      username: replicator
+    rewind:
+      username: rewind_user
+  create_replica_methods: [basebackup]
+  remove_data_directory_on_rewind_failure: false
+  remove_data_directory_on_diverged_timelines: false
+  basebackup:
+    max-rate: {{ basebackup_max_rate }}
+    checkpoint: spread
+  parameters:
+    unix_socket_directories: /tmp
+  pg_hba:
+    - local all all scram-sha-256
+    - host all {{ postgres_user }} 127.0.0.1/32 scram-sha-256
+    - host replication replicator 127.0.0.1/32 scram-sha-256
+{% for host in groups.pg_nodes %}
+    - host replication replicator {{ hostvars[host].node_ip }}/32 scram-sha-256
+    - host all rewind_user {{ hostvars[host].node_ip }}/32 scram-sha-256
+    - host all all {{ hostvars[host].node_ip }}/32 scram-sha-256
+{% endfor %}
+{% for cidr in admin_cidrs %}
+    - host all all {{ cidr }} scram-sha-256
+{% endfor %}
+    - host all all 0.0.0.0/0 reject
+    - host all all ::0/0 reject
+watchdog:
+  mode: required
+  device: /dev/watchdog
+  safety_margin: -1
+tags:
+  nofailover: {{ join_quarantined | bool | ternary('true', 'false') }}
+  nosync: {{ join_quarantined | bool | ternary('true', 'false') }}
+  noloadbalance: false
+  clonefrom: false

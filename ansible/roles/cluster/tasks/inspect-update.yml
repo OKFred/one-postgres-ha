@@ -1,0 +1,47 @@
+- name: Read the desired Compose configuration hash
+  ansible.builtin.command:
+    argv: [docker, compose, --env-file, .env, config, --hash, postgres]
+    chdir: "{{ deployment_root }}"
+  register: pg_ha_desired_hash
+  changed_when: false
+
+- name: Read the desired PostgreSQL image reference
+  ansible.builtin.command:
+    argv: [docker, compose, --env-file, .env, config, --format, json]
+    chdir: "{{ deployment_root }}"
+  register: pg_ha_desired_model
+  changed_when: false
+  no_log: true
+
+- name: Read the desired image ID
+  ansible.builtin.command:
+    argv: [docker, image, inspect, --format, '{{ "{{.Id}}" }}', "{{ (pg_ha_desired_model.stdout | from_json).services.postgres.image }}"]
+  register: pg_ha_desired_image
+  changed_when: false
+
+- name: Read any existing PostgreSQL container ID
+  ansible.builtin.command:
+    argv: [docker, compose, --env-file, .env, ps, --all, --quiet, postgres]
+    chdir: "{{ deployment_root }}"
+  register: pg_ha_existing_pg_container
+  changed_when: false
+
+- name: Read only existing image and configuration identity
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - --format
+      - '{% raw %}{{index .Config.Labels "com.docker.compose.image"}} {{index .Config.Labels "com.docker.compose.config-hash"}}{% endraw %}'
+      - "{{ pg_ha_existing_pg_container.stdout | trim }}"
+  register: pg_ha_existing_pg_identity
+  when: pg_ha_existing_pg_container.stdout | trim | length > 0
+  changed_when: false
+
+- name: Determine whether PostgreSQL actually needs reconciliation
+  ansible.builtin.set_fact:
+    pg_ha_pg_recreate: >-
+      {{ pg_ha_existing_pg_container.stdout | trim | length == 0
+      or pg_ha_patroni_template.changed
+      or pg_ha_existing_pg_identity.stdout | default('') | trim
+      != (pg_ha_desired_image.stdout | trim + ' ' + pg_ha_desired_hash.stdout.split()[-1]) }}

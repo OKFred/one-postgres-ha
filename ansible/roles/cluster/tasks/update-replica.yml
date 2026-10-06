@@ -1,0 +1,26 @@
+- name: Update an established replica
+  when:
+    - not hostvars[groups.core_nodes[0]].pg_ha_new_cluster
+    - inventory_hostname != hostvars[groups.core_nodes[0]].pg_ha_leader_host
+    - pg_ha_pg_recreate
+  block:
+    - name: Read its existing role
+      ansible.builtin.include_tasks: read-sql.yml
+    - name: Refuse to recreate a promoted primary
+      ansible.builtin.assert:
+        that: pg_ha_sql.in_recovery
+    - name: Reconcile the replica container
+      ansible.builtin.command:
+        argv: [docker, compose, --env-file, .env, up, -d, --no-build, --force-recreate, postgres]
+        chdir: "{{ deployment_root }}"
+      changed_when: true
+    - name: Wait for replica readiness
+      ansible.builtin.uri:
+        url: "http://{{ node_ip }}:{{ patroni_port }}/replica"
+        status_code: 200
+      register: pg_ha_updated_replica
+      retries: 120
+      delay: 2
+      until: pg_ha_updated_replica.status | default(0) == 200
+    - name: Verify its current WAL replay before updating another node
+      ansible.builtin.include_tasks: catch-up.yml

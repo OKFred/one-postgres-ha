@@ -1,0 +1,52 @@
+all:
+  vars:
+    ansible_user: deploy
+    ansible_become: true
+    cluster_name: one-postgres-ha
+    deployment_root: /opt/one-postgres-ha
+    deployment_environment: production
+    expected_architecture: aarch64
+    vip_address: 192.0.2.20
+    vip_prefix: 24
+    vip_router_id: 51
+    vip_reserved: false
+    keepalived_package_version: ''
+    admin_cidrs: [192.0.2.0/28]
+    client_cidrs: [192.0.2.0/24]
+    minimum_data_free_gib: 20
+    backup_target:
+      enabled: false
+      host: backup-01
+      path: /srv/postgres-backups/one-postgres-ha
+  children:
+    pg_nodes:
+      children:
+        core_nodes:
+          hosts:
+            armbian-01:
+              ansible_host: 192.0.2.11
+              node_ip: 192.0.2.11
+              node_name: armbian-01
+              data_mount: /mnt/postgres-ssd
+              data_root: /mnt/postgres-ssd/one-postgres-ha
+              network_interface: eth0
+            armbian-02:
+              ansible_host: 192.0.2.12
+              node_ip: 192.0.2.12
+              node_name: armbian-02
+              data_mount: /mnt/postgres-ssd
+              data_root: /mnt/postgres-ssd/one-postgres-ha
+              network_interface: eth0
+            armbian-03:
+              ansible_host: 192.0.2.13
+              node_ip: 192.0.2.13
+              node_name: armbian-03
+              data_mount: /mnt/postgres-ssd
+              data_root: /mnt/postgres-ssd/one-postgres-ha
+              network_interface: eth0
+        replica_nodes:
+          hosts: {}
+    backup_server:
+      hosts:
+        backup-01:
+          ansible_host: 198.51.100.10

@@ -1,0 +1,24 @@
+- name: Read the local Patroni member
+  ansible.builtin.uri:
+    url: "http://{{ node_ip }}:{{ patroni_port }}/patroni"
+    return_content: true
+    status_code: [200, 503]
+  register: pg_ha_patroni_status
+  failed_when: false
+  changed_when: false
+
+- name: Read running containers without their environment
+  ansible.builtin.command:
+    argv: [docker, compose, --env-file, .env, ps, --format, json]
+    chdir: "{{ deployment_root }}"
+  register: pg_ha_compose_status
+  failed_when: false
+  changed_when: false
+
+- name: Report this member
+  ansible.builtin.debug:
+    msg:
+      node: "{{ node_name }}"
+      patroni: "{{ pg_ha_patroni_status.json | default({'available': false}) }}"
+      compose: "{{ pg_ha_compose_status.stdout | default('') }}"
+      acceptance: not_performed_by_status

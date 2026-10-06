@@ -1,0 +1,80 @@
+- name: Validate the requested node name
+  hosts: core_nodes[0]
+  gather_facts: false
+  tasks:
+    - name: Require one explicitly requested replica inventory host
+      ansible.builtin.assert:
+        that:
+          - add_node is defined
+          - add_node in groups.pg_nodes
+          - add_node not in groups.core_nodes
+          - hostvars[add_node].node_name == add_node
+
+- name: Check the existing and requested nodes
+  ansible.builtin.import_playbook: preflight.yml
+
+- name: Inspect the live cluster before adding a replica
+  hosts: core_nodes[0]
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: inspect-join
+  roles: [cluster]
+
+- name: Show the non-mutating addition plan
+  hosts: "{{ add_node | default('__missing_add_node__') }}"
+  gather_facts: false
+  tasks:
+    - name: Describe the isolated replica workflow
+      ansible.builtin.debug:
+        msg:
+          node: "{{ add_node }}"
+          actions: [allow_replication_peer, clone_with_quarantine, replay_fixed_lsn, reload_existing_proxies, release_quarantine]
+          etcd_membership_changed: false
+          primary_switch_requested: false
+          execution: "{{ 'plan_only' if add_node_plan | default(false) | bool else 'apply' }}"
+
+- name: Allow the new replica to connect without restarting existing databases
+  hosts: "pg_nodes:!{{ add_node | default('__missing_add_node__') }}"
+  serial: 1
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: allow-replica
+  roles: [cluster]
+
+- name: Clone the new node in quarantine
+  hosts: "{{ add_node | default('__missing_add_node__') }}"
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: join-replica
+    join_quarantined: true
+  roles: [cluster]
+
+- name: Prepare all existing proxies before releasing the new replica
+  hosts: core_nodes
+  serial: 1
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: reload-proxy
+  roles: [cluster]
+
+- name: Release the fully caught-up replica only after all proxy updates
+  hosts: "{{ add_node | default('__missing_add_node__') }}"
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: release-replica
+    join_quarantined: false
+  roles: [cluster]
+
+- name: Verify all members after the addition
+  ansible.builtin.import_playbook: verify.yml
+  when: not add_node_plan | default(false) | bool

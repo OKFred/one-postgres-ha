@@ -1,0 +1,34 @@
+#!/bin/bash
+set -euo pipefail
+# Only the dedicated chains are replaced. Docker and unrelated host rules remain.
+iptables-restore --wait 5 --noflush <<'RULES'
+*filter
+:ONE_PG_HA - [0:0]
+-F ONE_PG_HA
+-A ONE_PG_HA -i lo -j ACCEPT
+{% for host in groups.pg_nodes %}
+-A ONE_PG_HA -p tcp -s {{ hostvars[host].node_ip }}/32 -m multiport --dports 5433,8008,2379,2380 -j ACCEPT
+{% endfor %}
+{% for cidr in admin_cidrs %}
+-A ONE_PG_HA -p tcp -s {{ cidr }} -m multiport --dports 5433,8008,2379 -j ACCEPT
+{% endfor %}
+{% for cidr in client_cidrs %}
+-A ONE_PG_HA -p tcp -s {{ cidr }} --dport 5432 -j ACCEPT
+{% endfor %}
+{% for host in groups.core_nodes %}
+-A ONE_PG_HA -p 112 -s {{ hostvars[host].node_ip }}/32 -j ACCEPT
+{% endfor %}
+-A ONE_PG_HA -j DROP
+COMMIT
+RULES
+iptables --wait 5 -C INPUT -p tcp -m multiport --dports 5432,5433,8008,2379,2380 -j ONE_PG_HA 2>/dev/null || iptables --wait 5 -I INPUT 1 -p tcp -m multiport --dports 5432,5433,8008,2379,2380 -j ONE_PG_HA
+iptables --wait 5 -C INPUT -p 112 -j ONE_PG_HA 2>/dev/null || iptables --wait 5 -I INPUT 1 -p 112 -j ONE_PG_HA
+ip6tables-restore --wait 5 --noflush <<'RULES'
+*filter
+:ONE_PG_HA - [0:0]
+-F ONE_PG_HA
+-A ONE_PG_HA -i lo -j ACCEPT
+-A ONE_PG_HA -j DROP
+COMMIT
+RULES
+ip6tables --wait 5 -C INPUT -p tcp -m multiport --dports 5432,5433,8008,2379,2380 -j ONE_PG_HA 2>/dev/null || ip6tables --wait 5 -I INPUT 1 -p tcp -m multiport --dports 5432,5433,8008,2379,2380 -j ONE_PG_HA

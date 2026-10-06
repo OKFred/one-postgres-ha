@@ -1,0 +1,33 @@
+- name: Perform a controlled switchover
+  ansible.builtin.include_tasks: switchover.yml
+
+- name: Require the previous primary to be a replica
+  ansible.builtin.uri:
+    url: "http://{{ hostvars[pg_ha_previous_leader_host].node_ip }}:{{ patroni_port }}/replica"
+    status_code: 200
+  register: pg_ha_old_primary_ready
+  retries: 60
+  delay: 2
+  until: pg_ha_old_primary_ready.status | default(0) == 200
+
+- name: Reconcile the old primary only after demotion
+  ansible.builtin.command:
+    argv: [docker, compose, --env-file, .env, up, -d, --no-build, --force-recreate, postgres]
+    chdir: "{{ deployment_root }}"
+  delegate_to: "{{ pg_ha_previous_leader_host }}"
+  changed_when: true
+
+- name: Wait for the old primary's recovery
+  ansible.builtin.uri:
+    url: "http://{{ hostvars[pg_ha_previous_leader_host].node_ip }}:{{ patroni_port }}/replica"
+    status_code: 200
+  register: pg_ha_old_primary_recovered
+  retries: 120
+  delay: 2
+  until: pg_ha_old_primary_recovered.status | default(0) == 200
+
+- name: Require the former primary to replay the new leader's WAL
+  ansible.builtin.include_tasks:
+    file: catch-up.yml
+    apply:
+      delegate_to: "{{ pg_ha_previous_leader_host }}"

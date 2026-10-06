@@ -1,0 +1,43 @@
+- name: Count active PostgreSQL containers
+  ansible.builtin.command:
+    argv: [docker, ps, --quiet, --filter, "label=com.docker.compose.project={{ compose_project_name }}", --filter, label=com.docker.compose.service=postgres]
+  register: pg_ha_running_postgres
+  changed_when: false
+
+- name: Probe existing etcd quorum
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --env-file
+      - .env
+      - exec
+      - -T
+      - etcd
+      - /usr/local/bin/etcdctl
+      - "--endpoints={% for host in groups.core_nodes %}https://{{ hostvars[host].node_ip }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+      - --cacert=/run/secrets/ca.crt
+      - --cert=/run/secrets/etcd.crt
+      - --key=/run/secrets/etcd.key
+      - endpoint
+      - health
+    chdir: "{{ deployment_root }}"
+  register: pg_ha_existing_etcd
+  failed_when: false
+  changed_when: false
+  run_once: true
+
+- name: Refuse deployment into an active cluster without quorum
+  ansible.builtin.assert:
+    that:
+      - >-
+        pg_ha_existing_etcd.rc | default(1) == 0 or
+        groups.core_nodes | map('extract', hostvars, 'pg_ha_running_postgres')
+        | map(attribute='stdout') | reject('equalto', '') | list | length == 0
+    fail_msg: PostgreSQL is active but etcd quorum is unavailable. Restore quorum before running deployment.
+  run_once: true
+
+- name: Classify the etcd startup
+  ansible.builtin.set_fact:
+    pg_ha_initial_etcd_start: "{{ pg_ha_existing_etcd.rc | default(1) != 0 }}"
+  run_once: true

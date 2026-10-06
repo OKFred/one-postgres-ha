@@ -1,0 +1,54 @@
+- name: Read this member's database state
+  ansible.builtin.include_tasks: read-sql.yml
+
+- name: Check Patroni can fetch this member's timeline over local replication
+  ansible.builtin.include_tasks: read-local-replication.yml
+
+- name: Read Patroni status
+  ansible.builtin.uri:
+    url: "http://{{ node_ip }}:{{ patroni_port }}/patroni"
+    return_content: true
+    status_code: 200
+  register: pg_ha_verified_patroni
+  changed_when: false
+
+- name: Validate this member's invariants
+  ansible.builtin.assert:
+    that:
+      - pg_ha_sql.server_version_num | int >= 180000
+      - pg_ha_sql.server_version_num | int < 190000
+      - pg_ha_sql.data_checksums == 'on'
+      - pg_ha_sql.synchronous_commit == 'on'
+      - pg_ha_verified_patroni.json.state == 'running'
+      - not pg_ha_verified_patroni.json.watchdog_failed | default(false)
+
+- name: Require one primary and one database identity
+  ansible.builtin.assert:
+    that:
+      - groups.pg_nodes | map('extract', hostvars, 'pg_ha_sql') | selectattr('in_recovery', 'equalto', false) | list | length == 1
+      - groups.pg_nodes | map('extract', hostvars, 'pg_ha_sql') | map(attribute='system_identifier') | unique | length == 1
+  run_once: true
+
+- name: Require a streaming synchronous replica on the primary
+  ansible.builtin.assert:
+    that:
+      - pg_ha_sql.replication | selectattr('state', 'equalto', 'streaming') | selectattr('sync_state', 'equalto', 'sync') | list | length >= 1
+  when: not pg_ha_sql.in_recovery
+
+- name: Check etcd health on core nodes
+  ansible.builtin.include_tasks: etcd-health.yml
+  when: inventory_hostname in groups.core_nodes
+
+- name: Check the local proxy readiness
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8404/ready
+    status_code: 200
+  when: inventory_hostname in groups.core_nodes
+
+- name: Report actual verification boundaries
+  ansible.builtin.debug:
+    msg:
+      node: "{{ node_name }}"
+      database_invariants: passed
+      identity: "{{ pg_ha_sql.system_identifier }}"
+      excludes: [site_failure_exercises, vip_failover, backup_restore, application_regression]

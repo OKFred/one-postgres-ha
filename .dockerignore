@@ -1,0 +1,10 @@
+.git
+.local
+.env
+.cache
+**/*.key
+**/*.pem
+**/*.dump
+**/*.sql.gz
+**/*.tar.gz
+**/__pycache__

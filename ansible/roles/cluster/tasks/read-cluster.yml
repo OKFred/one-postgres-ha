@@ -1,0 +1,28 @@
+- name: Read the existing cluster membership
+  ansible.builtin.uri:
+    url: "http://{{ hostvars[groups.core_nodes[0]].node_ip }}:{{ patroni_port }}/cluster"
+    return_content: true
+    status_code: 200
+  register: pg_ha_cluster_response
+  delegate_to: "{{ groups.core_nodes[0] }}"
+  changed_when: false
+
+- name: Require exactly one existing leader
+  ansible.builtin.assert:
+    that:
+      - pg_ha_cluster_response.json.members | selectattr('role', 'equalto', 'leader') | list | length == 1
+
+- name: Remember the leader name and inventory host
+  ansible.builtin.set_fact:
+    pg_ha_leader_name: "{{ (pg_ha_cluster_response.json.members | selectattr('role', 'equalto', 'leader') | first).name }}"
+
+- name: Resolve the leader against the inventory
+  ansible.builtin.set_fact:
+    pg_ha_leader_host: "{{ pg_ha_leader_name if pg_ha_leader_name in groups.pg_nodes else '' }}"
+
+- name: Require inventory names to match Patroni names
+  ansible.builtin.assert:
+    that:
+      - pg_ha_leader_host | length > 0
+      - node_name == inventory_hostname
+    fail_msg: This deployment uses the inventory hostname as Patroni member identity.

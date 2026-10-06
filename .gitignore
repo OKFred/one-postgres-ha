@@ -1,0 +1,12 @@
+.local/
+.env
+*.retry
+__pycache__/
+.ansible/
+.cache/
+*.key
+*.pem
+*.dump
+*.sql.gz
+*.tar.gz
+!.env.example

@@ -1,0 +1,105 @@
+---
+- name: Require one independent backup host
+  ansible.builtin.assert:
+    that:
+      - groups.get('backup_server', []) | length == 1
+      - backup_target.enabled | default(false) | bool
+      - backup_target.host == inventory_hostname
+      - backup_target.path is match('^/[A-Za-z0-9_./-]+$')
+      - backup_target.path not in ['/', '/tmp', '/var', '/srv', '/mnt', '/opt']
+      - inventory_hostname not in groups.get('pg_nodes', [])
+      - ansible_host not in (groups.get('pg_nodes', []) | map('extract', hostvars, 'ansible_host') | list)
+      - deployment_root is match('^/[A-Za-z0-9_./-]+$')
+    fail_msg: Configure exactly one independent backup_server and enabled backup_target with a dedicated absolute path.
+
+- name: Check Docker on the independent backup host
+  ansible.builtin.command:
+    argv: [docker, version, --format, "{{ '{{.Server.Version}}' }}"]
+  changed_when: false
+
+- name: Install data operation utilities
+  ansible.builtin.apt:
+    name: [jq, sqlite3, util-linux, coreutils]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Prepare private data directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  loop:
+    - "{{ deployment_root }}/data"
+    - "{{ deployment_root }}/data/secrets"
+
+- name: Install Bash and SQL data tooling
+  ansible.builtin.copy:
+    src: "{{ project_root }}/scripts/data/"
+    dest: "{{ deployment_root }}/data/"
+    owner: root
+    group: root
+    mode: preserve
+    directory_mode: '0700'
+
+- name: Install the PostgreSQL administrator credential
+  ansible.builtin.copy:
+    src: "{{ private_dir }}/secrets/postgres-password"
+    dest: "{{ deployment_root }}/data/secrets/postgres-password"
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+  diff: false
+
+- name: Resolve the pinned PostgreSQL client image
+  ansible.builtin.set_fact:
+    data_postgres_image: >-
+      {{ (lookup('ansible.builtin.file', project_root + '/versions.lock').splitlines()
+      | select('match', '^POSTGRES_BASE_IMAGE=') | first).split('=', 1)[1] }}
+    data_migrations: {}
+
+- name: Prepare configured migration sources
+  ansible.builtin.include_tasks: source.yml
+  loop: "{{ migration_databases | default({}) | dict2items }}"
+  loop_control:
+    loop_var: data_source
+    label: "{{ data_source.key }}"
+
+- name: Write private data operation configuration
+  ansible.builtin.copy:
+    content: "{{ data_config | to_nice_json }}"
+    dest: "{{ deployment_root }}/data/config.json"
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+  diff: false
+  vars:
+    data_config:
+      cluster_name: "{{ cluster_name }}"
+      directory: "{{ backup_target.path }}"
+      postgres_image: "{{ data_postgres_image }}"
+      target:
+        host: "{{ vip_address }}"
+        port: 5432
+        user: postgres
+        password_file: "{{ deployment_root }}/data/secrets/postgres-password"
+        sslmode: prefer
+      migrations: "{{ data_migrations }}"
+
+- name: Verify or initialize the dedicated backup directory ownership
+  ansible.builtin.command:
+    argv: [/bin/bash, "{{ deployment_root }}/data/data.sh", prepare-directory]
+  register: data_directory_result
+  changed_when: "'data directory initialized' in data_directory_result.stdout"
+
+- name: Check migration configuration availability
+  ansible.builtin.assert:
+    that:
+      - ha_data_database in data_migrations
+      - ha_data_database in migration_databases
+    fail_msg: Configure migration_databases for this database; see scripts/data/README.md.
+  when: ha_data_operation | default('') in ['migrate-plan', 'migrate-apply', 'rollback']

@@ -1,0 +1,11 @@
+[Unit]
+Description=one-postgres-ha scheduled {{ item }}
+
+[Timer]
+OnCalendar={{ '*-*-* 02:00:00' if item == 'backup' else 'Sun *-*-* 03:00:00' }}
+Persistent=true
+RandomizedDelaySec=5m
+Unit=one-postgres-ha-{{ item }}.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,200 @@
+- name: Create the deployment and private directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - "{{ deployment_root }}"
+    - "{{ deployment_root }}/config"
+    - "{{ deployment_root }}/secrets"
+    - "{{ deployment_root }}/bin"
+    - "{{ data_root }}"
+
+- name: Record this cluster's ownership of its data directory
+  ansible.builtin.copy:
+    content: "{{ cluster_name }}\n"
+    dest: "{{ data_root }}/.one-postgres-ha-cluster"
+    owner: root
+    group: root
+    mode: '0600'
+    force: false
+
+- name: Record this cluster's ownership of its deployment directory
+  ansible.builtin.copy:
+    content: "{{ cluster_name }}\n"
+    dest: "{{ deployment_root }}/.one-postgres-ha-cluster"
+    owner: root
+    group: root
+    mode: '0600'
+    force: false
+
+- name: Prepare PostgreSQL storage without recursively changing existing data
+  ansible.builtin.file:
+    path: "{{ data_root }}/postgres"
+    state: directory
+    owner: "{{ postgres_uid }}"
+    group: "{{ postgres_gid }}"
+    mode: '0700'
+
+- name: Prepare etcd storage on core nodes
+  ansible.builtin.file:
+    path: "{{ data_root }}/etcd"
+    state: directory
+    owner: "{{ etcd_uid }}"
+    group: "{{ etcd_gid }}"
+    mode: '0700'
+  when: inventory_hostname in groups.core_nodes
+
+- name: Install the actual Compose file
+  ansible.builtin.copy:
+    src: "{{ project_root }}/docker-compose.yml"
+    dest: "{{ deployment_root }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Install node environment
+  ansible.builtin.template:
+    src: node.env.j2
+    dest: "{{ deployment_root }}/.env"
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Install the cluster CA
+  ansible.builtin.copy:
+    src: "{{ private_dir }}/secrets/ca.crt"
+    dest: "{{ deployment_root }}/secrets/ca.crt"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Install PostgreSQL passwords
+  ansible.builtin.copy:
+    src: "{{ private_dir }}/secrets/{{ item }}"
+    dest: "{{ deployment_root }}/secrets/{{ item }}"
+    owner: "{{ postgres_uid }}"
+    group: "{{ postgres_gid }}"
+    mode: '0600'
+  loop: [postgres-password, replication-password, rewind-password, patroni-api-password]
+  no_log: true
+  diff: false
+
+- name: Install node TLS files
+  ansible.builtin.copy:
+    src: "{{ private_dir }}/secrets/{{ node_name }}/{{ item.name }}"
+    dest: "{{ deployment_root }}/secrets/{{ item.name }}"
+    owner: "{{ item.uid }}"
+    group: "{{ item.uid }}"
+    mode: "{{ '0600' if item.name.endswith('.key') else '0644' }}"
+  loop:
+    - {name: etcd.crt, uid: "{{ etcd_uid }}"}
+    - {name: etcd.key, uid: "{{ etcd_uid }}"}
+    - {name: patroni.crt, uid: "{{ postgres_uid }}"}
+    - {name: patroni.key, uid: "{{ postgres_uid }}"}
+  no_log: true
+  diff: false
+
+- name: Render Patroni configuration without embedding credentials
+  ansible.builtin.template:
+    src: patroni.yml.j2
+    dest: "{{ deployment_root }}/config/patroni.yml"
+    owner: root
+    group: root
+    mode: '0644'
+  register: pg_ha_patroni_template
+
+- name: Render etcd configuration
+  ansible.builtin.template:
+    src: etcd.yml.j2
+    dest: "{{ deployment_root }}/config/etcd.yml"
+    owner: root
+    group: root
+    mode: '0644'
+  when: inventory_hostname in groups.core_nodes
+
+- name: Render the proxy configuration
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: "{{ deployment_root }}/config/haproxy.next.cfg"
+    owner: root
+    group: root
+    mode: '0644'
+  when: inventory_hostname in groups.core_nodes
+
+- name: Validate the proxy configuration before publishing it
+  ansible.builtin.command:
+    argv: [docker, compose, --env-file, .env, run, --rm, --no-deps, haproxy, haproxy, -c, -f, /etc/one-postgres-ha/haproxy.next.cfg]
+    chdir: "{{ deployment_root }}"
+  changed_when: false
+  when: inventory_hostname in groups.core_nodes
+
+- name: Publish the validated proxy configuration
+  ansible.builtin.copy:
+    remote_src: true
+    src: "{{ deployment_root }}/config/haproxy.next.cfg"
+    dest: "{{ deployment_root }}/config/haproxy.cfg"
+    owner: root
+    group: root
+    mode: '0644'
+  register: pg_ha_haproxy_template
+  when: inventory_hostname in groups.core_nodes
+
+- name: Allow the non-root Patroni process to open the exclusively owned watchdog
+  ansible.builtin.file:
+    path: "{{ watchdog_device }}"
+    owner: root
+    group: "{{ watchdog_gid }}"
+    mode: '0660'
+
+- name: Persist watchdog device permissions
+  ansible.builtin.copy:
+    dest: /etc/udev/rules.d/70-one-postgres-ha-watchdog.rules
+    content: |
+      SUBSYSTEM=="watchdog", KERNEL=="watchdog*", GROUP="{{ watchdog_gid }}", MODE="0660"
+      SUBSYSTEM=="misc", KERNEL=="watchdog", GROUP="{{ watchdog_gid }}", MODE="0660"
+    owner: root
+    group: root
+    mode: '0644'
+  register: pg_ha_udev
+
+- name: Reload device permission rules without opening the watchdog # noqa no-handler
+  # Permissions must be effective before the first Patroni starts in this play.
+  ansible.builtin.command:
+    argv: [udevadm, control, --reload]
+  when: pg_ha_udev.changed
+  changed_when: true
+
+- name: Install and apply the firewall startup gate
+  ansible.builtin.include_tasks: firewall.yml
+
+- name: Install the pinned Keepalived package
+  ansible.builtin.apt:
+    name: "keepalived={{ keepalived_package_version }}"
+    state: present
+    update_cache: true
+    policy_rc_d: 101
+  when: inventory_hostname in groups.core_nodes
+  register: pg_ha_keepalived_package
+
+- name: Install the local proxy readiness check before validating Keepalived
+  ansible.builtin.copy:
+    dest: "{{ deployment_root }}/bin/check-proxy.sh"
+    content: "#!/bin/sh\nexec curl --fail --silent --max-time 2 http://127.0.0.1:8404/ready >/dev/null\n"
+    owner: root
+    group: root
+    mode: '0755'
+  when: inventory_hostname in groups.core_nodes
+
+- name: Render host Keepalived configuration
+  ansible.builtin.template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    owner: root
+    group: root
+    mode: '0600'
+    validate: /usr/sbin/keepalived --config-test --use-file=%s
+  when: inventory_hostname in groups.core_nodes
+  register: pg_ha_keepalived_config

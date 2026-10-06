@@ -1,0 +1,99 @@
+---
+- name: Validate the selected source shape
+  ansible.builtin.assert:
+    that:
+      - data_source.key in ['one_minihouse', 'nexus']
+      - data_source.value.source.host is defined
+      - data_source.value.source.port | default(5432) | int > 0
+      - data_source.value.source.database == data_source.key
+      - data_source.value.source.user is defined
+      - data_source.value.source.password_file is defined
+      - data_source.value.required_roles | length > 0
+    fail_msg: Migration source requires host, port, database, admin user, password_file and explicit business required_roles.
+
+- name: Install the source database credential
+  ansible.builtin.copy:
+    src: "{{ data_source.value.source.password_file }}"
+    dest: "{{ deployment_root }}/data/secrets/source-{{ data_source.key }}-password"
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+  diff: false
+
+- name: Inspect configured private acceptance files
+  ansible.builtin.stat:
+    path: "{{ data_source.value[item] }}"
+  delegate_to: localhost
+  become: false
+  loop: [acceptance_file, stable_minihouse_file]
+  when: data_source.value[item] is defined
+  register: data_acceptance_stats
+  no_log: true
+
+- name: Install available private acceptance evidence
+  ansible.builtin.copy:
+    src: "{{ data_source.value[item.item] }}"
+    dest: "{{ deployment_root }}/data/{{ data_source.key }}-{{ item.item }}.json"
+    owner: root
+    group: root
+    mode: '0600'
+  loop: "{{ data_acceptance_stats.results }}"
+  when: item.stat.exists | default(false)
+  no_log: true
+  diff: false
+
+- name: Build source configuration with remote credential paths
+  ansible.builtin.set_fact:
+    data_migrations: "{{ data_migrations | combine({data_source.key: data_source_config}) }}"
+  no_log: true
+  vars:
+    data_source_config:
+      source:
+        host: "{{ data_source.value.source.host }}"
+        port: "{{ data_source.value.source.port | default(5432) }}"
+        database: "{{ data_source.value.source.database }}"
+        user: "{{ data_source.value.source.user }}"
+        password_file: "{{ deployment_root }}/data/secrets/source-{{ data_source.key }}-password"
+        sslmode: "{{ data_source.value.source.sslmode | default('prefer') }}"
+      required_roles: "{{ data_source.value.required_roles }}"
+      acceptance_file: "{{ deployment_root }}/data/{{ data_source.key }}-acceptance_file.json"
+      stable_minihouse_file: "{{ deployment_root }}/data/{{ data_source.key }}-stable_minihouse_file.json"
+
+- name: Install the real read-only role credential
+  ansible.builtin.copy:
+    src: "{{ data_source.value.readonly.password_file }}"
+    dest: "{{ deployment_root }}/data/secrets/readonly-{{ data_source.key }}-password"
+    owner: root
+    group: root
+    mode: '0600'
+  when: data_source.value.readonly is defined
+  no_log: true
+  diff: false
+
+- name: Install read-only regression queries
+  ansible.builtin.copy:
+    src: "{{ data_source.value.readonly.sql_file }}"
+    dest: "{{ deployment_root }}/data/{{ data_source.key }}-readonly.sql"
+    owner: root
+    group: root
+    mode: '0600'
+  when: data_source.value.readonly is defined
+  no_log: true
+  diff: false
+
+- name: Add the real restricted regression connection
+  ansible.builtin.set_fact:
+    data_migrations: >-
+      {{ data_migrations | combine({data_source.key:
+      data_migrations[data_source.key] | combine({'readonly': data_readonly_connection})}) }}
+  when: data_source.value.readonly is defined
+  no_log: true
+  vars:
+    data_readonly_connection:
+      host: "{{ vip_address }}"
+      port: 5432
+      user: "{{ data_source.value.readonly.user }}"
+      password_file: "{{ deployment_root }}/data/secrets/readonly-{{ data_source.key }}-password"
+      sslmode: prefer
+      sql_file: "{{ deployment_root }}/data/{{ data_source.key }}-readonly.sql"

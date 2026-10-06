@@ -1,0 +1,12 @@
+- name: Display the intended changes without secrets
+  ansible.builtin.debug:
+    msg:
+      node: "{{ node_name }}"
+      role: "{{ 'core' if inventory_hostname in groups.core_nodes else 'replica' }}"
+      compose: "{{ deployment_root }}/docker-compose.yml"
+      data: "{{ data_root }}"
+      current_managed_data: "{{ pg_ha_marker.stat.exists }}"
+      required_watchdog: "{{ watchdog_device }}"
+      would_install_host_keepalived: "{{ inventory_hostname in groups.core_nodes }}"
+      would_modify_etcd_membership: false
+      rollout: "start-etcd-quorum-then-primary-then-replicas or existing-replicas-then-switchover"

@@ -1,0 +1,26 @@
+name: node-01
+data-dir: /etcd-data
+listen-client-urls: https://127.0.0.1:2379,https://192.0.2.11:2379
+advertise-client-urls: https://192.0.2.11:2379
+listen-peer-urls: https://192.0.2.11:2380
+initial-advertise-peer-urls: https://192.0.2.11:2380
+initial-cluster: node-01=https://192.0.2.11:2380,node-02=https://192.0.2.12:2380,node-03=https://192.0.2.13:2380
+initial-cluster-state: new
+initial-cluster-token: example-pg18
+client-transport-security:
+  cert-file: /run/secrets/etcd.crt
+  key-file: /run/secrets/etcd.key
+  client-cert-auth: true
+  trusted-ca-file: /run/secrets/ca.crt
+peer-transport-security:
+  cert-file: /run/secrets/etcd.crt
+  key-file: /run/secrets/etcd.key
+  client-cert-auth: true
+  trusted-ca-file: /run/secrets/ca.crt
+auto-compaction-mode: periodic
+auto-compaction-retention: 1h
+quota-backend-bytes: 67108864
+heartbeat-interval: 100
+election-timeout: 1000
+logger: zap
+log-level: info

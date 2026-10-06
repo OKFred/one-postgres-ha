@@ -1,0 +1,66 @@
+- name: Release the validated replica
+  when:
+    - not hostvars[groups.core_nodes[0]].pg_ha_join_already_accepted
+    - not add_node_plan | default(false) | bool
+  block:
+    - name: Verify replay once more after all proxy updates
+      ansible.builtin.include_tasks: catch-up.yml
+    - name: Render the accepted replica configuration
+      ansible.builtin.template:
+        src: patroni.yml.j2
+        dest: "{{ deployment_root }}/config/patroni.yml"
+        owner: root
+        group: root
+        mode: '0644'
+    - name: Reload the accepted member's tags
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --env-file
+          - .env
+          - exec
+          - -T
+          - postgres
+          - /usr/local/bin/patroni-entrypoint
+          - patronictl
+          - -c
+          - /etc/one-postgres-ha/patroni.yml
+          - reload
+          - "{{ cluster_name }}"
+          - "{{ node_name }}"
+          - --force
+        chdir: "{{ deployment_root }}"
+      no_log: true
+      changed_when: true
+    - name: Wait until quarantine tags are released
+      ansible.builtin.uri:
+        url: "http://{{ node_ip }}:{{ patroni_port }}/patroni"
+        status_code: 200
+        return_content: true
+      register: pg_ha_accepted_node
+      retries: 30
+      delay: 2
+      until:
+        - not pg_ha_accepted_node.json.tags.nofailover | default(false)
+        - not pg_ha_accepted_node.json.tags.nosync | default(false)
+    - name: Remove only the completed-operation marker
+      ansible.builtin.file:
+        path: "{{ data_root }}/.one-postgres-ha-join-pending"
+        state: absent
+    - name: Report the actual result
+      ansible.builtin.debug:
+        msg:
+          node: "{{ node_name }}"
+          joined: true
+          etcd_membership_changed: false
+          requested_primary_switch: false
+          site_fault_exercises: not_performed
+
+- name: Finish marker cleanup after a previously successful acceptance
+  ansible.builtin.file:
+    path: "{{ data_root }}/.one-postgres-ha-join-pending"
+    state: absent
+  when:
+    - hostvars[groups.core_nodes[0]].pg_ha_join_already_accepted
+    - not add_node_plan | default(false) | bool

@@ -1,0 +1,78 @@
+- name: Require quorum before any PostgreSQL starts
+  ansible.builtin.include_tasks: etcd-health.yml
+
+- name: Read the Patroni initialization key
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --env-file
+      - .env
+      - exec
+      - -T
+      - etcd
+      - /usr/local/bin/etcdctl
+      - "--endpoints=https://{{ node_ip }}:2379"
+      - --cacert=/run/secrets/ca.crt
+      - --cert=/run/secrets/etcd.crt
+      - --key=/run/secrets/etcd.key
+      - get
+      - "/service/{{ cluster_name }}/initialize"
+      - --print-value-only
+    chdir: "{{ deployment_root }}"
+  register: pg_ha_initialize_key
+  changed_when: false
+
+- name: Remember whether PostgreSQL bootstrap is required
+  ansible.builtin.set_fact:
+    pg_ha_new_cluster: "{{ pg_ha_initialize_key.stdout | trim | length == 0 }}"
+
+- name: Refuse a missing initialization key over existing PostgreSQL data
+  ansible.builtin.stat:
+    path: "{{ hostvars[item].data_root }}/postgres/PG_VERSION"
+  delegate_to: "{{ item }}"
+  loop: "{{ groups.pg_nodes }}"
+  register: pg_ha_existing_pg_versions
+  when: pg_ha_new_cluster
+
+- name: Require an empty new PostgreSQL cluster
+  ansible.builtin.assert:
+    that: pg_ha_existing_pg_versions.results | selectattr('stat.exists', 'equalto', true) | list | length == 0
+    fail_msg: DCS has no initialization key but PostgreSQL data exists; automatic bootstrap would be unsafe.
+  when: pg_ha_new_cluster
+
+- name: Read established dynamic configuration without changing it
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --env-file
+      - .env
+      - exec
+      - -T
+      - etcd
+      - /usr/local/bin/etcdctl
+      - "--endpoints=https://{{ node_ip }}:2379"
+      - --cacert=/run/secrets/ca.crt
+      - --cert=/run/secrets/etcd.crt
+      - --key=/run/secrets/etcd.key
+      - get
+      - "/service/{{ cluster_name }}/config"
+      - --print-value-only
+    chdir: "{{ deployment_root }}"
+  register: pg_ha_existing_dynamic
+  changed_when: false
+  when: not pg_ha_new_cluster
+  no_log: true
+
+- name: Require established strict synchronous protection
+  ansible.builtin.assert:
+    that:
+      - (pg_ha_existing_dynamic.stdout | from_json).synchronous_mode | bool
+      - (pg_ha_existing_dynamic.stdout | from_json).synchronous_mode_strict | bool
+      - (pg_ha_existing_dynamic.stdout | from_json).synchronous_node_count | int == 1
+      - (pg_ha_existing_dynamic.stdout | from_json).postgresql.use_pg_rewind | bool
+      - (pg_ha_existing_dynamic.stdout | from_json).postgresql.parameters.synchronous_commit == 'on'
+    fail_msg: Existing DCS protection differs from this deployment. Bootstrap templates do not update initialized clusters.
+  when: not pg_ha_new_cluster
+  no_log: true

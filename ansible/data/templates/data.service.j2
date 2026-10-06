@@ -1,0 +1,19 @@
+[Unit]
+Description=one-postgres-ha {{ item }}
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+WorkingDirectory={{ deployment_root }}/data
+ExecStart=/bin/bash {{ deployment_root }}/data/data.sh {{ item }}
+TimeoutStartSec=6h
+Nice=10
+CPUQuota=200%
+MemoryMax=2G
+StandardOutput=journal
+StandardError=journal

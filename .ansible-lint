@@ -1,0 +1,8 @@
+profile: production
+exclude_paths:
+  - .local/
+  - tests/fixtures/
+skip_list:
+  - yaml[line-length]
+  - name[template]
+  - var-naming[no-role-prefix]

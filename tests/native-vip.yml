@@ -1,0 +1,46 @@
+- name: Query or commit an explicit acceptance marker through the VIP
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars:
+    ansible_become: false
+    native_default_sql: >-
+      SELECT json_build_object('identity', (pg_control_system()).system_identifier::text,
+      'checksums', current_setting('data_checksums'),
+      'sync_commit', current_setting('synchronous_commit'),
+      'primary', NOT pg_is_in_recovery(), 'server', inet_server_addr()::text)::text;
+  tasks:
+    - name: Require explicit opt-in for supplied SQL
+      ansible.builtin.assert:
+        that: native_sql is not defined or native_apply | default(false) | bool
+        fail_msg: Supplied acceptance SQL requires native_apply=true; default is a read-only query.
+    - name: Use the shared tools PostgreSQL client and private password file
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -X
+          - -A
+          - -t
+          - -h
+          - "{{ vip_address }}"
+          - -p
+          - '5432'
+          - -U
+          - postgres
+          - -d
+          - postgres
+          - -v
+          - ON_ERROR_STOP=1
+          - -c
+          - "{{ native_sql | default(native_default_sql) }}"
+      environment:
+        PGPASSWORD: "{{ lookup('ansible.builtin.file', private_dir + '/secrets/postgres-password') }}"
+        PGCONNECT_TIMEOUT: '5'
+        PGOPTIONS: '-c statement_timeout=15000'
+      register: native_vip_result
+      changed_when: native_apply | default(false) | bool
+      no_log: true
+    - name: Show only the acceptance query result
+      ansible.builtin.debug:
+        msg: "{{ native_vip_result.stdout_lines }}"

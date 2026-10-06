@@ -1,0 +1,14 @@
+---
+- name: Restore source connection access only before PG18 may have accepted writes
+  ansible.builtin.command:
+    argv: [/bin/bash, "{{ deployment_root }}/data/data.sh", rollback, "{{ ha_data_database }}"]
+  changed_when: true
+  no_log: true
+
+- name: Restart Nexus against its unchanged old endpoint after a pre-write rollback
+  ansible.builtin.command:
+    argv: [docker, compose, up, -d, --no-deps, "{{ migration_databases.nexus.nexus_service }}"]
+    chdir: "{{ migration_databases.nexus.nexus_compose_dir }}"
+  delegate_to: "{{ migration_databases.nexus.client_host }}"
+  when: ha_data_database == 'nexus'
+  changed_when: true

@@ -1,0 +1,33 @@
+# Managed by one-postgres-ha. Do not use this file for other VRRP instances.
+global_defs {
+    router_id {{ node_name }}
+    enable_script_security
+    script_user root
+}
+vrrp_script postgres_proxy_ready {
+    script "{{ deployment_root }}/bin/check-proxy.sh"
+    interval 2
+    timeout 2
+    fall 2
+    rise 2
+}
+vrrp_instance POSTGRES_HA {
+    state BACKUP
+    interface {{ network_interface }}
+    virtual_router_id {{ vip_router_id }}
+    priority {{ 150 - groups.core_nodes.index(inventory_hostname) * 10 }}
+    advert_int 1
+    nopreempt
+    unicast_src_ip {{ node_ip }}
+    unicast_peer {
+{% for host in groups.core_nodes if host != inventory_hostname %}
+        {{ hostvars[host].node_ip }}
+{% endfor %}
+    }
+    virtual_ipaddress {
+        {{ vip_address }}/{{ vip_prefix }} dev {{ network_interface }}
+    }
+    track_script {
+        postgres_proxy_ready
+    }
+}

@@ -1,0 +1,9 @@
+- name: Capture the original primary's reconciliation requirement
+  ansible.builtin.set_fact:
+    pg_ha_update_primary_needed: "{{ not pg_ha_new_cluster and hostvars[pg_ha_leader_host].pg_ha_pg_recreate }}"
+
+- name: Update the old primary after a controlled switchover
+  ansible.builtin.include_tasks: update-primary-after-switch.yml
+  when:
+    - not pg_ha_new_cluster
+    - pg_ha_update_primary_needed

@@ -1,0 +1,26 @@
+global
+    log stdout format raw local0
+    maxconn 200
+    stats socket /run/haproxy/admin.sock mode 600 level admin
+defaults
+    log global
+    mode tcp
+    timeout connect 5s
+    timeout client 1h
+    timeout server 1h
+    timeout check 3s
+frontend postgres_write
+    bind 0.0.0.0:5432
+    default_backend pg_primary
+backend pg_primary
+    option httpchk GET /primary
+    http-check expect status 200
+    default-server inter 2s fall 3 rise 2 on-marked-down shutdown-sessions
+{% for host in groups.pg_nodes %}
+    server {{ hostvars[host].node_name }} {{ hostvars[host].node_ip }}:{{ postgres_port }} check port {{ patroni_port }}
+{% endfor %}
+frontend local_readiness
+    bind 127.0.0.1:8404
+    mode http
+    monitor-uri /ready
+    monitor fail if { nbsrv(pg_primary) lt 1 }

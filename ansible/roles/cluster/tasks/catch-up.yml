@@ -1,0 +1,49 @@
+- name: Read a fixed replay target from the current primary
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --env-file
+      - .env
+      - exec
+      - -T
+      - postgres
+      - /usr/local/bin/pg-admin
+      - psql
+      - -X
+      - -A
+      - -t
+      - -d
+      - postgres
+      - -c
+      - 'SELECT pg_current_wal_lsn()::text;'
+    chdir: "{{ deployment_root }}"
+  delegate_to: "{{ hostvars[groups.core_nodes[0]].pg_ha_leader_host }}"
+  register: pg_ha_target_lsn
+  changed_when: false
+
+- name: Wait until this replica has replayed the captured LSN
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --env-file
+      - .env
+      - exec
+      - -T
+      - postgres
+      - /usr/local/bin/pg-admin
+      - psql
+      - -X
+      - -A
+      - -t
+      - -d
+      - postgres
+      - -c
+      - "SELECT pg_is_in_recovery() AND COALESCE(pg_last_wal_replay_lsn() >= '{{ pg_ha_target_lsn.stdout | trim }}'::pg_lsn, false);"
+    chdir: "{{ deployment_root }}"
+  register: pg_ha_replayed
+  retries: "{{ (join_catchup_timeout | int / 2) | int }}"
+  delay: 2
+  until: pg_ha_replayed.stdout | trim == 't'
+  changed_when: false

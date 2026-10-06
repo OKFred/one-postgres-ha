@@ -1,0 +1,441 @@
+---
+- name: Load the selected application migration settings
+  ansible.builtin.set_fact:
+    data_client: "{{ migration_databases[ha_data_database] }}"
+    data_client_state: "{{ deployment_root }}/migration-{{ ha_data_database }}"
+  no_log: true
+
+- name: Require an explicit application host
+  ansible.builtin.assert:
+    that:
+      - data_client.client_host is defined
+      - data_client.client_host in hostvars
+      - data_client.readonly.user is defined
+      - data_client.readonly.password_file is defined
+      - data_client.readonly.sql_file is defined
+    fail_msg: Migration needs a client_host and real read-only role credential/regression SQL; see the data README.
+
+- name: Validate oneMiniHouse application settings
+  ansible.builtin.assert:
+    that:
+      - data_client.ingestor_config is defined
+      - data_client.ingestor_compose_dir is defined
+      - data_client.ingestor_service is match('^[a-zA-Z0-9_-]+$')
+      - data_client.ingestor_queue_file is defined
+      - data_client.ingestor_health_file is defined
+      - data_client.grafana_url is defined
+      - data_client.grafana_uid is defined
+      - data_client.grafana_token_file is defined
+      - data_client.public_dashboard_url is defined
+    fail_msg: Configure ingestor files/service and existing Grafana UID/token/public URL before freezing PG17.
+  when: ha_data_database == 'one_minihouse'
+
+- name: Validate Nexus application and independent blob-copy settings
+  ansible.builtin.assert:
+    that:
+      - data_client.nexus_compose_dir is defined
+      - data_client.nexus_service is match('^[a-zA-Z0-9_-]+$')
+      - data_client.blob_directory is match('^/[A-Za-z0-9_./-]+$')
+      - data_client.blob_directory not in ['/', '/tmp', '/var', '/mnt', '/srv']
+      - data_client.jdbc_properties_file is defined
+      - data_client.jdbc_property_key is defined
+      - data_client.health_url is defined
+      - data_client.registry.host is defined
+      - data_client.registry.user is defined
+      - data_client.registry.password_file is defined
+      - data_client.registry.base_image is defined
+      - data_client.registry.namespace is defined
+      - data_client.old_postgres_service is match('^[a-zA-Z0-9_-]+$')
+      - data_client.blob_ssh_identity_file is match('^/[A-Za-z0-9_./-]+$')
+      - data_client.blob_ssh_user is match('^[a-zA-Z_][a-zA-Z0-9_-]*$')
+      - hostvars[data_client.client_host].ansible_host is match('^[A-Za-z0-9_.-]+$')
+    fail_msg: Nexus needs a dedicated stopped-app blob backup, pre-provisioned backup-host SSH identity, JDBC settings and registry acceptance account.
+  when: ha_data_database == 'nexus'
+
+- name: Install client operation utilities
+  ansible.builtin.apt:
+    name: [jq, sqlite3, curl, rsync, acl]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  delegate_to: "{{ data_client.client_host }}"
+
+- name: Prepare the application migration state directory
+  ansible.builtin.file:
+    path: "{{ data_client_state }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  delegate_to: "{{ data_client.client_host }}"
+
+- name: Install specific application adapter scripts
+  ansible.builtin.copy:
+    src: "{{ project_root }}/scripts/data/{{ item }}"
+    dest: "{{ data_client_state }}/{{ item }}"
+    owner: root
+    group: root
+    mode: '0700'
+  loop: [client.sh, registry-verify.sh]
+  delegate_to: "{{ data_client.client_host }}"
+
+- name: Install the private Grafana token
+  ansible.builtin.copy:
+    src: "{{ data_client.grafana_token_file }}"
+    dest: "{{ data_client_state }}/grafana-token"
+    owner: root
+    group: root
+    mode: '0600'
+  delegate_to: "{{ data_client.client_host }}"
+  when: ha_data_database == 'one_minihouse'
+  no_log: true
+  diff: false
+
+- name: Install the private registry acceptance password
+  ansible.builtin.copy:
+    src: "{{ data_client.registry.password_file }}"
+    dest: "{{ data_client_state }}/registry-password"
+    owner: root
+    group: root
+    mode: '0600'
+  delegate_to: "{{ data_client.client_host }}"
+  when: ha_data_database == 'nexus'
+  no_log: true
+  diff: false
+
+- name: Verify all database acceptance gates before pausing applications
+  ansible.builtin.command:
+    argv: [/bin/bash, "{{ deployment_root }}/data/data.sh", migrate-precheck, "{{ ha_data_database }}"]
+  changed_when: false
+  no_log: true
+
+- name: Precheck the existing ingestor endpoint
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - "{{ data_client_state }}/client.sh"
+      - ingestor-check
+      - "{{ data_client.ingestor_config }}"
+      - "{{ data_client.endpoint_old_host | default(data_client.source.host) }}"
+      - "{{ vip_address }}"
+  delegate_to: "{{ data_client.client_host }}"
+  when: ha_data_database == 'one_minihouse'
+  changed_when: false
+  no_log: true
+
+- name: Precheck the existing Grafana datasource identity
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - "{{ data_client_state }}/client.sh"
+      - grafana-check
+      - "{{ data_client.grafana_url }}"
+      - "{{ data_client.grafana_uid }}"
+      - "{{ data_client_state }}/grafana-token"
+      - "{{ data_client.endpoint_old_host | default(data_client.source.host) }}"
+      - "{{ vip_address }}"
+  delegate_to: "{{ data_client.client_host }}"
+  when: ha_data_database == 'one_minihouse'
+  changed_when: false
+  no_log: true
+
+- name: Precheck the existing Nexus JDBC endpoint
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - "{{ data_client_state }}/client.sh"
+      - nexus-check
+      - "{{ data_client.jdbc_properties_file }}"
+      - "{{ data_client.jdbc_property_key }}"
+      - "{{ data_client.endpoint_old_host | default(data_client.source.host) }}"
+      - "{{ vip_address }}"
+  delegate_to: "{{ data_client.client_host }}"
+  when: ha_data_database == 'nexus'
+  changed_when: false
+  no_log: true
+
+- name: Verify the Nexus blob transfer identity before stopping Nexus
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -o
+      - BatchMode=yes
+      - -o
+      - StrictHostKeyChecking=yes
+      - -i
+      - "{{ data_client.blob_ssh_identity_file }}"
+      - "{{ data_client.blob_ssh_user }}@{{ hostvars[data_client.client_host].ansible_host }}"
+      - 'true'
+  when: ha_data_database == 'nexus'
+  changed_when: false
+  no_log: true
+
+- name: Back up the SQLite queue using its online backup API
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - "{{ data_client_state }}/client.sh"
+      - queue-backup
+      - "{{ data_client.ingestor_queue_file }}"
+      - "{{ data_client_state }}"
+  delegate_to: "{{ data_client.client_host }}"
+  when: ha_data_database == 'one_minihouse'
+  changed_when: true
+  no_log: true
+
+- name: Stop Nexus writes before database and blob snapshots
+  ansible.builtin.command:
+    argv: [docker, compose, stop, "{{ data_client.nexus_service }}"]
+    chdir: "{{ data_client.nexus_compose_dir }}"
+  delegate_to: "{{ data_client.client_host }}"
+  when: ha_data_database == 'nexus'
+  changed_when: true
+
+- name: Freeze only the selected database, export and restore into HA
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - "{{ deployment_root }}/data/data.sh"
+      - migrate-apply
+      - "{{ ha_data_database }}"
+  changed_when: true
+  no_log: true
+
+- name: Read the durable migration work directory
+  ansible.builtin.slurp:
+    src: "{{ backup_target.path }}/state/{{ ha_data_database }}.json"
+  register: data_migration_state
+  no_log: true
+
+- name: Resolve the durable migration snapshot
+  ansible.builtin.set_fact:
+    data_work: "{{ (data_migration_state.content | b64decode | from_json).work }}"
+  no_log: true
+
+- name: Archive and copy stopped Nexus blob storage
+  when: ha_data_database == 'nexus'
+  block:
+    - name: Prepare a dedicated read-only blob export directory
+      ansible.builtin.file:
+        path: "{{ data_client_state }}/blob-export"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+      delegate_to: "{{ data_client.client_host }}"
+
+    - name: Archive blobs while Nexus remains stopped
+      ansible.builtin.command:
+        argv:
+          - tar
+          - --create
+          - --file
+          - "{{ data_client_state }}/blob-export/nexus-blobs.tar"
+          - --directory
+          - "{{ data_client.blob_directory | dirname }}"
+          - --
+          - "{{ data_client.blob_directory | basename }}"
+      delegate_to: "{{ data_client.client_host }}"
+      changed_when: true
+
+    - name: Permit transfer-user traversal without giving it ownership of root tooling
+      ansible.builtin.command:
+        argv: [setfacl, -m, "u:{{ data_client.blob_ssh_user }}:--x", "{{ data_client_state }}"]
+      delegate_to: "{{ data_client.client_host }}"
+      changed_when: true
+
+    - name: Permit transfer-user read-only access to the snapshot directory
+      ansible.builtin.command:
+        argv: [setfacl, -m, "u:{{ data_client.blob_ssh_user }}:r-x", "{{ data_client_state }}/blob-export"]
+      delegate_to: "{{ data_client.client_host }}"
+      changed_when: true
+
+    - name: Permit transfer-user read-only access to the blob archive
+      ansible.builtin.command:
+        argv: [setfacl, -m, "u:{{ data_client.blob_ssh_user }}:r--", "{{ data_client_state }}/blob-export/nexus-blobs.tar"]
+      delegate_to: "{{ data_client.client_host }}"
+      changed_when: true
+
+    - name: Transfer the blob archive to the independent backup server
+      ansible.builtin.command:
+        argv:
+          - rsync
+          - --archive
+          - --checksum
+          - --protect-args
+          - --rsh
+          - "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i {{ data_client.blob_ssh_identity_file }}"
+          - "{{ data_client.blob_ssh_user }}@{{ hostvars[data_client.client_host].ansible_host }}:{{ data_client_state }}/blob-export/nexus-blobs.tar"
+          - "{{ data_work }}/nexus-blobs.tar"
+      changed_when: true
+      no_log: true
+
+    - name: Validate the independent blob archive
+      ansible.builtin.command:
+        argv: [tar, --list, --file, "{{ data_work }}/nexus-blobs.tar"]
+      changed_when: false
+      no_log: true
+
+    - name: Hash the consistent database and blob recovery set
+      ansible.builtin.shell:
+        cmd: sha256sum -- nexus-blobs.tar nexus.dump > NEXUS-SHA256SUMS
+        chdir: "{{ data_work }}"
+        executable: /bin/bash
+      changed_when: true
+
+- name: Capture the end of the queued PG17 pause
+  ansible.builtin.command:
+    argv: [/bin/bash, "{{ data_client_state }}/client.sh", queue-cutoff, "{{ data_client_state }}"]
+  delegate_to: "{{ data_client.client_host }}"
+  when: ha_data_database == 'one_minihouse'
+  changed_when: true
+
+- name: Mark possible PG18 writes before touching any client endpoint
+  ansible.builtin.command:
+    argv: [/bin/bash, "{{ deployment_root }}/data/data.sh", write-started, "{{ ha_data_database }}"]
+  changed_when: true
+  no_log: true
+
+- name: Change only oneMiniHouse local database host
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - "{{ data_client_state }}/client.sh"
+      - ingestor-switch
+      - "{{ data_client.ingestor_config }}"
+      - "{{ data_client.endpoint_old_host | default(data_client.source.host) }}"
+      - "{{ vip_address }}"
+  delegate_to: "{{ data_client.client_host }}"
+  when: ha_data_database == 'one_minihouse'
+  changed_when: true
+  no_log: true
+
+- name: Recreate only the ingestor service, retaining its queue and MQTT session configuration
+  ansible.builtin.command:
+    argv: [docker, compose, up, -d, --no-deps, --force-recreate, "{{ data_client.ingestor_service }}"]
+    chdir: "{{ data_client.ingestor_compose_dir }}"
+  delegate_to: "{{ data_client.client_host }}"
+  when: ha_data_database == 'one_minihouse'
+  changed_when: true
+
+- name: Change only the existing Grafana datasource endpoint and check its health
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - "{{ data_client_state }}/client.sh"
+      - grafana-switch
+      - "{{ data_client.grafana_url }}"
+      - "{{ data_client.grafana_uid }}"
+      - "{{ data_client_state }}/grafana-token"
+      - "{{ data_client.endpoint_old_host | default(data_client.source.host) }}"
+      - "{{ vip_address }}"
+  delegate_to: "{{ data_client.client_host }}"
+  when: ha_data_database == 'one_minihouse'
+  changed_when: true
+  no_log: true
+
+- name: Verify backlog replay and a real post-switch local delivery
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - "{{ data_client_state }}/client.sh"
+      - queue-verify
+      - "{{ data_client.ingestor_queue_file }}"
+      - "{{ data_client.ingestor_health_file }}"
+      - "{{ data_client_state }}"
+  delegate_to: "{{ data_client.client_host }}"
+  when: ha_data_database == 'one_minihouse'
+  changed_when: false
+  no_log: true
+
+- name: Verify that the existing public dashboard remains accessible
+  ansible.builtin.uri:
+    url: "{{ data_client.public_dashboard_url }}"
+    status_code: 200
+    return_content: false
+    timeout: 60
+  when: ha_data_database == 'one_minihouse'
+  changed_when: false
+  no_log: true
+
+- name: Change only the Nexus JDBC host
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - "{{ data_client_state }}/client.sh"
+      - nexus-switch
+      - "{{ data_client.jdbc_properties_file }}"
+      - "{{ data_client.jdbc_property_key }}"
+      - "{{ data_client.endpoint_old_host | default(data_client.source.host) }}"
+      - "{{ vip_address }}"
+  delegate_to: "{{ data_client.client_host }}"
+  when: ha_data_database == 'nexus'
+  changed_when: true
+  no_log: true
+
+- name: Start Nexus against its restored HA database
+  ansible.builtin.command:
+    argv: [docker, compose, up, -d, --no-deps, --force-recreate, "{{ data_client.nexus_service }}"]
+    chdir: "{{ data_client.nexus_compose_dir }}"
+  delegate_to: "{{ data_client.client_host }}"
+  when: ha_data_database == 'nexus'
+  changed_when: true
+
+- name: Wait for Nexus readiness
+  ansible.builtin.uri:
+    url: "{{ data_client.health_url }}"
+    status_code: 200
+    timeout: 30
+  register: data_nexus_ready
+  retries: 60
+  delay: 10
+  until: data_nexus_ready.status | default(0) == 200
+  when: ha_data_database == 'nexus'
+  no_log: true
+
+- name: Perform actual authenticated Nexus Docker push and pull
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - "{{ data_client_state }}/registry-verify.sh"
+      - "{{ data_client.registry.host }}"
+      - "{{ data_client.registry.user }}"
+      - "{{ data_client_state }}/registry-password"
+      - "{{ data_client.registry.base_image }}"
+      - "{{ data_client.registry.namespace }}"
+  delegate_to: "{{ data_client.client_host }}"
+  when: ha_data_database == 'nexus'
+  register: data_registry_acceptance
+  changed_when: true
+  no_log: true
+
+- name: Save the actual Docker acceptance record with the recovery set
+  ansible.builtin.copy:
+    content: "{{ data_registry_acceptance.stdout }}"
+    dest: "{{ data_work }}/docker-acceptance.json"
+    owner: root
+    group: root
+    mode: '0600'
+  when: ha_data_database == 'nexus'
+  no_log: true
+  diff: false
+
+- name: Run database regressions using the real read-only role
+  ansible.builtin.command:
+    argv: [/bin/bash, "{{ deployment_root }}/data/data.sh", verify-readonly, "{{ ha_data_database }}"]
+  changed_when: false
+  no_log: true
+
+- name: Mark the completed migration without unfreezing the stale source
+  ansible.builtin.command:
+    argv: [/bin/bash, "{{ deployment_root }}/data/data.sh", complete, "{{ ha_data_database }}"]
+  changed_when: true
+  no_log: true
+
+- name: Stop only the old dedicated Nexus PostgreSQL after acceptance
+  ansible.builtin.command:
+    argv: [docker, compose, stop, "{{ data_client.old_postgres_service }}"]
+    chdir: "{{ data_client.nexus_compose_dir }}"
+  delegate_to: "{{ data_client.client_host }}"
+  when: ha_data_database == 'nexus'
+  changed_when: true

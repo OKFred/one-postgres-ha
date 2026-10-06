@@ -1,0 +1,8 @@
+- name: Verify running PostgreSQL members and cluster invariants
+  hosts: pg_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: verify
+  roles: [cluster]

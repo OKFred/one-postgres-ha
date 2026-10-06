@@ -1,0 +1,45 @@
+- name: Read the running proxy identity before reconciliation
+  ansible.builtin.command:
+    argv: [docker, compose, --env-file, .env, ps, --quiet, haproxy]
+    chdir: "{{ deployment_root }}"
+  register: pg_ha_proxy_before
+  changed_when: false
+
+- name: Start the local proxy
+  ansible.builtin.command:
+    argv: [docker, compose, --env-file, .env, up, -d, --no-build, haproxy]
+    chdir: "{{ deployment_root }}"
+  changed_when: true
+
+- name: Read the running proxy identity after reconciliation
+  ansible.builtin.command:
+    argv: [docker, compose, --env-file, .env, ps, --quiet, haproxy]
+    chdir: "{{ deployment_root }}"
+  register: pg_ha_proxy_after
+  changed_when: false
+
+- name: Reload changed configuration on an existing HAProxy master # noqa no-handler
+  # Readiness and VIP enablement must observe the new config within this play.
+  ansible.builtin.command:
+    argv: [docker, compose, --env-file, .env, kill, --signal, SIGUSR2, haproxy]
+    chdir: "{{ deployment_root }}"
+  when:
+    - pg_ha_haproxy_template.changed
+    - pg_ha_proxy_before.stdout | trim | length > 0
+    - pg_ha_proxy_before.stdout | trim == pg_ha_proxy_after.stdout | trim
+  changed_when: true
+
+- name: Require a ready proxy before starting the VIP service
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8404/ready
+    status_code: 200
+  register: pg_ha_proxy_ready
+  retries: 30
+  delay: 2
+  until: pg_ha_proxy_ready.status | default(0) == 200
+
+- name: Enable the host VIP service
+  ansible.builtin.systemd_service:
+    name: keepalived
+    enabled: true
+    state: "{{ 'restarted' if pg_ha_keepalived_config.changed or pg_ha_keepalived_package.changed else 'started' }}"

@@ -1,0 +1,23 @@
+name: {{ node_name }}
+data-dir: /etcd-data
+listen-client-urls: https://{{ node_ip }}:2379,https://127.0.0.1:2379
+advertise-client-urls: https://{{ node_ip }}:2379
+listen-peer-urls: https://{{ node_ip }}:2380
+initial-advertise-peer-urls: https://{{ node_ip }}:2380
+initial-cluster: "{% for host in groups.core_nodes %}{{ hostvars[host].node_name }}=https://{{ hostvars[host].node_ip }}:2380{% if not loop.last %},{% endif %}{% endfor %}"
+initial-cluster-token: {{ cluster_name }}
+initial-cluster-state: new
+strict-reconfig-check: true
+quota-backend-bytes: 67108864
+auto-compaction-mode: periodic
+auto-compaction-retention: 1h
+client-transport-security:
+  cert-file: /run/secrets/etcd.crt
+  key-file: /run/secrets/etcd.key
+  trusted-ca-file: /run/secrets/ca.crt
+  client-cert-auth: true
+peer-transport-security:
+  cert-file: /run/secrets/etcd.crt
+  key-file: /run/secrets/etcd.key
+  trusted-ca-file: /run/secrets/ca.crt
+  client-cert-auth: true

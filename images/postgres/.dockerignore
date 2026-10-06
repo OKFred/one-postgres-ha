@@ -1,0 +1,7 @@
+*
+!Dockerfile
+!requirements.lock
+!build-requirements.lock
+!entrypoint.sh
+!healthcheck.sh
+!pg-admin.sh

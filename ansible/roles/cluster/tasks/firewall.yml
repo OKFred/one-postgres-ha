@@ -1,0 +1,98 @@
+- name: Select the host services protected by the startup firewall
+  ansible.builtin.set_fact:
+    pg_ha_firewall_services: "{{ ['docker.service'] + (['keepalived.service'] if inventory_hostname in groups.core_nodes else []) }}"
+
+- name: Refuse replacement of unowned firewall units or dependency files
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import json, pathlib, stat, sys
+        unit, dependency, services = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+        root = pathlib.Path('/etc/systemd/system')
+        paths = {root / 'one-postgres-ha-firewall.service': [unit, unit.replace('ExecReload='+sys.argv[4]+'/bin/firewall.sh\n', '')]}
+        for service in services:
+            paths[root / (service+'.d') / '30-one-postgres-ha-firewall.conf'] = [dependency]
+        for path, expected in paths.items():
+            for parent in [*path.parents]:
+                if parent.is_symlink():
+                    raise SystemExit('Refusing a linked systemd configuration directory')
+                if parent.exists():
+                    info = parent.stat()
+                    if not parent.is_dir() or info.st_uid != 0 or info.st_mode & 0o022:
+                        raise SystemExit('Unowned or writable systemd configuration directory')
+            if path.is_symlink():
+                raise SystemExit('Refusing a linked firewall unit or dependency file')
+            if path.exists():
+                info = path.stat()
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                    raise SystemExit('Unowned or writable firewall unit or dependency file')
+                if path.read_text().strip() not in [item.strip() for item in expected]:
+                    raise SystemExit('An unknown firewall unit or dependency file requires manual review')
+      - "{{ lookup('ansible.builtin.template', 'firewall.service.j2') }}"
+      - "{{ lookup('ansible.builtin.template', 'firewall-dependency.conf.j2') }}"
+      - "{{ pg_ha_firewall_services | to_json }}"
+      - "{{ deployment_root }}"
+  changed_when: false
+
+- name: Install the allowlist firewall script
+  ansible.builtin.template:
+    src: firewall.sh.j2
+    dest: "{{ deployment_root }}/bin/firewall.sh"
+    owner: root
+    group: root
+    mode: '0750'
+  register: pg_ha_firewall_script
+
+- name: Install the firewall persistence service
+  ansible.builtin.template:
+    src: firewall.service.j2
+    dest: /etc/systemd/system/one-postgres-ha-firewall.service
+    owner: root
+    group: root
+    mode: '0644'
+  register: pg_ha_firewall_unit
+
+- name: Prepare service dependency directories without replacing existing drop-ins
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item }}.d"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop: "{{ pg_ha_firewall_services }}"
+
+- name: Require the firewall before Docker or Keepalived starts
+  ansible.builtin.template:
+    src: firewall-dependency.conf.j2
+    dest: "/etc/systemd/system/{{ item }}.d/30-one-postgres-ha-firewall.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ pg_ha_firewall_services }}"
+  register: pg_ha_firewall_dependencies
+
+- name: Apply the firewall without stopping dependent services
+  # Reload re-runs the allowlist script without propagating a stop to Docker.
+  # Ansible starts the oneshot service when it has not yet run.
+  ansible.builtin.systemd_service:
+    name: one-postgres-ha-firewall
+    daemon_reload: "{{ pg_ha_firewall_unit.changed or pg_ha_firewall_dependencies.changed }}"
+    enabled: true
+    state: "{{ 'reloaded' if pg_ha_firewall_script.changed or pg_ha_firewall_unit.changed else 'started' }}"
+
+- name: Read the loaded firewall startup dependencies
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=Requires, --property=After, "{{ item }}"]
+  loop: "{{ pg_ha_firewall_services }}"
+  register: pg_ha_loaded_firewall_dependencies
+  changed_when: false
+
+- name: Require both failure propagation and startup ordering
+  ansible.builtin.assert:
+    that:
+      - "'one-postgres-ha-firewall.service' in (item.stdout_lines | select('match', '^Requires=') | first).split('=', 1)[1].split()"
+      - "'one-postgres-ha-firewall.service' in (item.stdout_lines | select('match', '^After=') | first).split('=', 1)[1].split()"
+    fail_msg: A host service does not require the startup firewall; inspect its systemd configuration.
+  loop: "{{ pg_ha_loaded_firewall_dependencies.results }}"

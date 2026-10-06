@@ -1,0 +1,35 @@
+- name: Update peer access while leaving existing services running
+  when:
+    - not hostvars[groups.core_nodes[0]].pg_ha_join_already_accepted
+    - not add_node_plan | default(false) | bool
+  block:
+    - name: Render additional replication peer access
+      ansible.builtin.template:
+        src: patroni.yml.j2
+        dest: "{{ deployment_root }}/config/patroni.yml"
+        owner: root
+        group: root
+        mode: '0644'
+    - name: Reload Patroni's local configuration
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --env-file
+          - .env
+          - exec
+          - -T
+          - postgres
+          - /usr/local/bin/patroni-entrypoint
+          - patronictl
+          - -c
+          - /etc/one-postgres-ha/patroni.yml
+          - reload
+          - "{{ cluster_name }}"
+          - "{{ node_name }}"
+          - --force
+        chdir: "{{ deployment_root }}"
+      no_log: true
+      changed_when: true
+    - name: Update the firewall startup gate and peer allowlist
+      ansible.builtin.include_tasks: firewall.yml

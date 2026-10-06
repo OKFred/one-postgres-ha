@@ -1,0 +1,152 @@
+- name: Discover the current leader
+  ansible.builtin.include_tasks: read-cluster.yml
+
+- name: Read current synchronous replica names
+  ansible.builtin.command: &pg_ha_sync_sql_query
+    argv:
+      - docker
+      - compose
+      - --env-file
+      - .env
+      - exec
+      - -T
+      - postgres
+      - /usr/local/bin/pg-admin
+      - psql
+      - -X
+      - -A
+      - -t
+      - -d
+      - postgres
+      - -c
+      - "SELECT COALESCE(json_agg(application_name), '[]'::json) FROM pg_stat_replication WHERE state='streaming' AND sync_state='sync';"
+    chdir: "{{ deployment_root }}"
+  delegate_to: "{{ pg_ha_leader_host }}"
+  register: pg_ha_sync_candidates
+  changed_when: false
+  retries: "{{ (operation_timeout | int / 2) | int }}"
+  delay: 2
+  until: >-
+    pg_ha_sync_candidates.rc == 0
+    and pg_ha_sync_candidates.stdout | default('[]', true) | from_json | length > 0
+
+- name: Select a current synchronous replica unless an explicit candidate was supplied
+  ansible.builtin.set_fact:
+    pg_ha_switchover_target: "{{ ops_target | default((pg_ha_sync_candidates.stdout | from_json | first), true) }}"
+    pg_ha_previous_leader_host: "{{ pg_ha_leader_host }}"
+    pg_ha_expected_switchover_leader: "{{ pg_ha_leader_name }}"
+
+- name: Validate the switchover target
+  ansible.builtin.assert:
+    that:
+      - pg_ha_switchover_target in groups.pg_nodes
+      - pg_ha_switchover_target != pg_ha_leader_host
+      - pg_ha_switchover_target in pg_ha_sync_candidates.stdout | from_json
+    fail_msg: The target must be a healthy current synchronous replica. No asynchronous forced promotion is performed.
+
+- name: Require a healthy candidate with no quarantine tags
+  ansible.builtin.uri:
+    url: "http://{{ hostvars[pg_ha_switchover_target].node_ip }}:{{ patroni_port }}/patroni"
+    status_code: 200
+    return_content: true
+  register: pg_ha_switchover_member
+
+- name: Require an eligible running replica
+  ansible.builtin.assert:
+    that:
+      - pg_ha_switchover_member.json.state == 'running'
+      - pg_ha_switchover_member.json.role == 'replica'
+      - not pg_ha_switchover_member.json.tags.nofailover | default(false)
+      - not pg_ha_switchover_member.json.tags.nosync | default(false)
+      - not pg_ha_switchover_member.json.watchdog_failed | default(false)
+
+- name: Wait until Patroni records the candidate as synchronous
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --env-file
+      - .env
+      - exec
+      - -T
+      - etcd
+      - /usr/local/bin/etcdctl
+      - "--endpoints={% for host in groups.core_nodes %}https://{{ hostvars[host].node_ip }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+      - --cacert=/run/secrets/ca.crt
+      - --cert=/run/secrets/etcd.crt
+      - --key=/run/secrets/etcd.key
+      - get
+      - "/service/{{ cluster_name }}/sync"
+      - --consistency=l
+      - --print-value-only
+    chdir: "{{ deployment_root }}"
+  delegate_to: "{{ groups.core_nodes[0] }}"
+  register: pg_ha_switchover_sync
+  changed_when: false
+  retries: "{{ (operation_timeout | int / 2) | int }}"
+  delay: 2
+  until: >-
+    pg_ha_switchover_sync.rc == 0
+    and (pg_ha_switchover_sync.stdout | default('{}', true) | from_json).leader | default('')
+      == pg_ha_expected_switchover_leader
+    and pg_ha_switchover_target in
+      ((pg_ha_switchover_sync.stdout | default('{}', true) | from_json).sync_standby | default('', true)).split(',')
+
+- name: Refresh the leader immediately before requesting a switchover
+  ansible.builtin.include_tasks: read-cluster.yml
+
+- name: Confirm the original leader is still current
+  ansible.builtin.assert:
+    that:
+      - pg_ha_leader_name == pg_ha_expected_switchover_leader
+      - pg_ha_leader_host == pg_ha_previous_leader_host
+    fail_msg: The leader changed while waiting for synchronous eligibility; no switchover was requested.
+
+- name: Refresh SQL synchronous state immediately before the request
+  ansible.builtin.command: *pg_ha_sync_sql_query
+  delegate_to: "{{ pg_ha_leader_host }}"
+  register: pg_ha_sync_candidates_final
+  changed_when: false
+
+- name: Require the fixed candidate to remain synchronous in PostgreSQL
+  ansible.builtin.assert:
+    that: pg_ha_switchover_target in pg_ha_sync_candidates_final.stdout | from_json
+    fail_msg: The candidate lost SQL synchronous status; no switchover was requested.
+
+- name: Request the controlled switchover
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --env-file
+      - .env
+      - exec
+      - -T
+      - postgres
+      - /usr/local/bin/patroni-entrypoint
+      - patronictl
+      - -c
+      - /etc/one-postgres-ha/patroni.yml
+      - switchover
+      - "{{ cluster_name }}"
+      - --leader
+      - "{{ pg_ha_leader_name }}"
+      - --candidate
+      - "{{ pg_ha_switchover_target }}"
+      - --force
+    chdir: "{{ deployment_root }}"
+  delegate_to: "{{ pg_ha_leader_host }}"
+  no_log: true
+  changed_when: true
+
+- name: Wait for the candidate to become the primary
+  ansible.builtin.uri:
+    url: "http://{{ hostvars[pg_ha_switchover_target].node_ip }}:{{ patroni_port }}/primary"
+    status_code: 200
+  register: pg_ha_switched
+  retries: "{{ (operation_timeout | int / 2) | int }}"
+  delay: 2
+  until: pg_ha_switched.status | default(0) == 200
+
+- name: Refresh the leader identity
+  ansible.builtin.include_tasks: read-cluster.yml

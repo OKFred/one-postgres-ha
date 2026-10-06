@@ -1,0 +1,116 @@
+- name: Audit every inventory PostgreSQL node before any destructive action
+  hosts: pg_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Load fallback values without overriding private inventory
+      ansible.builtin.include_vars:
+        file: roles/cluster/defaults/main.yml
+        name: ha_cleanup_defaults
+    - name: Require the full cluster inventory and an explicit cleanup mode
+      ansible.builtin.assert:
+        that:
+          - groups.core_nodes | length == 3
+          - groups.core_nodes | difference(groups.pg_nodes) | length == 0
+          - groups.pg_nodes | difference(ansible_play_hosts_all) | length == 0
+          - ha_cleanup_apply | default(false) | string | lower in ['true', 'false']
+          - node_name == inventory_hostname
+          - node_ip is defined
+          - data_mount is defined
+          - data_root is defined
+        fail_msg: Cleanup must audit every pg_nodes host and use an explicit boolean apply flag.
+    - name: Create a temporary backend file outside all deleted directories
+      ansible.builtin.tempfile:
+        state: file
+        prefix: one-postgres-ha-cleanup-
+      register: ha_cleanup_backend
+    - name: Install the cleanup backend for this invocation
+      ansible.builtin.copy:
+        src: "{{ project_root }}/scripts/cleanup-node.sh"
+        dest: "{{ ha_cleanup_backend.path }}"
+        owner: root
+        group: root
+        mode: '0700'
+    - name: Build the fixed cleanup arguments from the private inventory
+      ansible.builtin.set_fact:
+        ha_cleanup_arguments:
+          - --deployment-root
+          - "{{ deployment_root | default(ha_cleanup_defaults.deployment_root) }}"
+          - --data-root
+          - "{{ data_root }}"
+          - --data-mount
+          - "{{ data_mount }}"
+          - --cluster-name
+          - "{{ cluster_name }}"
+          - --node-name
+          - "{{ node_name }}"
+          - --node-ip
+          - "{{ node_ip }}"
+          - --compose-project
+          - "{{ compose_project_name | default(ha_cleanup_defaults.compose_project_name) }}"
+          - --watchdog-device
+          - "{{ watchdog_device | default(ha_cleanup_defaults.watchdog_device) }}"
+          - --watchdog-gid
+          - "{{ watchdog_gid | default(ha_cleanup_defaults.watchdog_gid) | string }}"
+          - "{{ '--core' if inventory_hostname in groups.core_nodes else '--replica' }}"
+    - name: Inspect ownership paths containers and service configuration without deleting
+      ansible.builtin.command:
+        argv: "{{ ['/bin/bash', ha_cleanup_backend.path, 'audit'] + ha_cleanup_arguments }}"
+      register: ha_cleanup_audit
+      changed_when: false
+    - name: Show the per-node deletion preview
+      ansible.builtin.debug:
+        msg: "{{ ha_cleanup_audit.stdout | from_json }}"
+
+- name: Stop all owned ingress services before databases
+  hosts: pg_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Stop owned Keepalived and HAProxy only after all audits passed
+      ansible.builtin.command:
+        argv: "{{ ['/bin/bash', ha_cleanup_backend.path, 'stop-ingress'] + ha_cleanup_arguments + ['--apply'] }}"
+      when: ha_cleanup_apply | default(false) | bool
+      changed_when: true
+
+- name: Stop every PostgreSQL member before stopping DCS
+  hosts: pg_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Gracefully stop owned Patroni containers
+      ansible.builtin.command:
+        argv: "{{ ['/bin/bash', ha_cleanup_backend.path, 'stop-postgres'] + ha_cleanup_arguments + ['--apply'] }}"
+      when: ha_cleanup_apply | default(false) | bool
+      changed_when: true
+
+- name: Stop the owned etcd members after all database processes stopped
+  hosts: pg_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Stop owned DCS containers
+      ansible.builtin.command:
+        argv: "{{ ['/bin/bash', ha_cleanup_backend.path, 'stop-etcd'] + ha_cleanup_arguments + ['--apply'] }}"
+      when: ha_cleanup_apply | default(false) | bool
+      changed_when: true
+
+- name: Remove only verified project directories and configuration
+  hosts: pg_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Delete the owned PG etcd deployment and dedicated service configuration
+      ansible.builtin.command:
+        argv: "{{ ['/bin/bash', ha_cleanup_backend.path, 'remove'] + ha_cleanup_arguments + ['--apply'] }}"
+      when: ha_cleanup_apply | default(false) | bool
+      changed_when: true
+    - name: Remove this invocation's temporary backend
+      ansible.builtin.file:
+        path: "{{ ha_cleanup_backend.path }}"
+        state: absent

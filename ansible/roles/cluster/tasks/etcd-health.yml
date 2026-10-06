@@ -1,0 +1,23 @@
+- name: Require healthy etcd endpoints
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --env-file
+      - .env
+      - exec
+      - -T
+      - etcd
+      - /usr/local/bin/etcdctl
+      - "--endpoints={% for host in groups.core_nodes %}https://{{ hostvars[host].node_ip }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+      - --cacert=/run/secrets/ca.crt
+      - --cert=/run/secrets/etcd.crt
+      - --key=/run/secrets/etcd.key
+      - endpoint
+      - health
+    chdir: "{{ deployment_root }}"
+  register: pg_ha_etcd_health
+  retries: 30
+  delay: 2
+  until: pg_ha_etcd_health.rc == 0
+  changed_when: false

@@ -1,0 +1,40 @@
+- name: Identify the local server using the authenticated physical replication protocol
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --env-file
+      - .env
+      - exec
+      - -T
+      - postgres
+      - /usr/local/bin/patroni-entrypoint
+      - bash
+      - -c
+      - >-
+        export PGPASSWORD="$PATRONI_REPLICATION_PASSWORD";
+        exec psql -X -A -t -v ON_ERROR_STOP=1
+        -d 'host=127.0.0.1 port={{ postgres_port }} user=replicator replication=true connect_timeout=5'
+        -c IDENTIFY_SYSTEM
+    chdir: "{{ deployment_root }}"
+  register: pg_ha_local_replication_result
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Require local replication authentication and a complete identity reply
+  ansible.builtin.assert:
+    that:
+      - pg_ha_local_replication_result.rc == 0
+      - pg_ha_local_replication_result.stdout | trim | length > 0
+      - pg_ha_local_replication_result.stdout.strip().split('|') | length == 4
+    fail_msg: Local replicator IDENTIFY_SYSTEM failed; check the loopback replication pg_hba rule and credential.
+
+- name: Validate the local replication identity and timeline
+  ansible.builtin.assert:
+    that:
+      - pg_ha_local_replication_result.stdout.strip().split('|')[0] == pg_ha_sql.system_identifier
+      - pg_ha_local_replication_result.stdout.strip().split('|')[1] | int > 0
+      - pg_ha_local_replication_result.stdout.strip().split('|')[2] is match('^[0-9A-F]+/[0-9A-F]+$')
+      - pg_ha_local_replication_result.stdout.strip().split('|')[3] == ''
+    fail_msg: Local physical replication did not report this database identity and a valid timeline/WAL position.

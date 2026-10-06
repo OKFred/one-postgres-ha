@@ -1,0 +1,25 @@
+project_root: "{{ playbook_dir | dirname }}"
+private_dir: "{{ project_root }}/.local"
+deployment_root: /opt/one-postgres-ha
+deployment_environment: production
+expected_architecture: aarch64
+postgres_uid: 999
+postgres_gid: 999
+etcd_uid: 65532
+etcd_gid: 65532
+watchdog_device: /dev/watchdog
+watchdog_gid: 999
+minimum_data_free_gib: 20
+compose_project_name: one-postgres-ha
+postgres_user: postgres
+patroni_api_user: admin
+postgres_port: 5433
+patroni_port: 8008
+postgres_memory_mb: 1536
+etcd_memory_mb: 256
+basebackup_max_rate: 5M
+join_timeout: 7200
+join_catchup_timeout: 600
+operation_timeout: 180
+replica_max_lag_bytes: 1048576
+join_quarantined: false

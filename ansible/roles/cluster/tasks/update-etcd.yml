@@ -1,0 +1,10 @@
+- name: Update one established etcd process
+  ansible.builtin.command:
+    argv: [docker, compose, --env-file, .env, up, -d, --no-build, etcd]
+    chdir: "{{ deployment_root }}"
+  when: not hostvars[groups.core_nodes[0]].pg_ha_initial_etcd_start
+  changed_when: true
+
+- name: Wait for all endpoints before proceeding to another member
+  ansible.builtin.include_tasks: etcd-health.yml
+  when: not hostvars[groups.core_nodes[0]].pg_ha_initial_etcd_start

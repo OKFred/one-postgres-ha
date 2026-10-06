@@ -1,0 +1,49 @@
+- name: Clone the requested node without allowing election or sync selection
+  when:
+    - not hostvars[groups.core_nodes[0]].pg_ha_join_already_accepted
+    - not add_node_plan | default(false) | bool
+  block:
+    - name: Prepare the isolated new replica
+      ansible.builtin.include_tasks: prepare.yml
+    - name: Mark the addition as pending before starting PostgreSQL
+      ansible.builtin.copy:
+        content: "{{ cluster_name }}\n"
+        dest: "{{ data_root }}/.one-postgres-ha-join-pending"
+        owner: root
+        group: root
+        mode: '0600'
+    - name: Copy the locked application image build context
+      ansible.builtin.copy:
+        src: "{{ project_root }}/images/postgres/"
+        dest: "{{ deployment_root }}/images/postgres/"
+        owner: root
+        group: root
+        mode: preserve
+    - name: Build the new node's image
+      ansible.builtin.command:
+        argv: [docker, compose, --env-file, .env, build, postgres]
+        chdir: "{{ deployment_root }}"
+      changed_when: true
+    - name: Start only PostgreSQL and Patroni
+      ansible.builtin.command:
+        argv: [docker, compose, --env-file, .env, up, -d, --no-build, --no-deps, postgres]
+        chdir: "{{ deployment_root }}"
+      changed_when: true
+    - name: Wait for the new replica to be running
+      ansible.builtin.uri:
+        url: "http://{{ node_ip }}:{{ patroni_port }}/replica"
+        status_code: 200
+      register: pg_ha_new_replica
+      retries: "{{ (join_timeout | int / 5) | int }}"
+      delay: 5
+      until: pg_ha_new_replica.status | default(0) == 200
+    - name: Verify database identity
+      ansible.builtin.include_tasks: read-sql.yml
+    - name: Require the original cluster and a recovery role
+      ansible.builtin.assert:
+        that:
+          - pg_ha_sql.system_identifier == hostvars[groups.core_nodes[0]].pg_ha_join_identity
+          - pg_ha_sql.in_recovery
+          - pg_ha_sql.data_checksums == 'on'
+    - name: Wait for fixed-LSN replay
+      ansible.builtin.include_tasks: catch-up.yml

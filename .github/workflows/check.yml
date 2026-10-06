@@ -1,0 +1,66 @@
+name: Check deployment
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Scan complete Git history with pinned Gitleaks
+        run: |
+          bash scripts/ci/install-gitleaks.sh
+          "$HOME/.local/bin/gitleaks" git . --log-opts='--all --full-history' --redact=100 --no-banner
+      - name: Install the pinned Compose CLI plugin
+        run: |
+          bash scripts/ci/install-compose.sh
+          docker compose version
+          docker buildx version
+      - name: Build the control tool image
+        run: bash ops.sh tools
+      - name: Check Bash, YAML, Ansible and credential handling
+        run: bash ops.sh check
+      - name: Validate Ansible-rendered Docker inspect format
+        run: bash tests/test-inspect-format.sh
+      - name: Build the native PostgreSQL image
+        run: docker compose build postgres
+      - name: Check repeat builds and Compose image identity
+        run: bash tests/test-build-identity.sh
+      - name: Validate core and replica Compose profiles
+        run: |
+          docker compose config --format json > /tmp/replica-compose.json
+          COMPOSE_PROFILES=core docker compose config --format json > /tmp/core-compose.json
+          jq -e '.services | keys == ["postgres"]' /tmp/replica-compose.json
+          jq -e '.services | keys == ["etcd","haproxy","postgres"]' /tmp/core-compose.json
+      - name: Run isolated three-node replication tests
+        run: bash tests/integration.sh
+      - name: Verify cleanup and reinstall with isolated Docker containers
+        run: bash tests/test-cleanup-containers.sh
+      - name: Rehearse PostgreSQL 17 to 18 and backup restore
+        run: bash scripts/data/test-integration.sh
+      - name: Build deployment bundle
+        run: bash ops.sh package
+      - name: Upload code bundle and test reports
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: deployment-${{ matrix.runner }}
+          path: |
+            .local/dist/*.tar.gz
+            .local/dist/*.sha256
+            .local/reports/*.json
+          if-no-files-found: error
+          retention-days: 14

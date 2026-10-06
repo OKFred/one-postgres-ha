@@ -1,0 +1,7 @@
+- name: Collect cluster state
+  hosts: pg_nodes
+  gather_facts: false
+  become: true
+  vars:
+    cluster_action: status
+  roles: [cluster]

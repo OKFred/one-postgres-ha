@@ -1,0 +1,68 @@
+---
+- name: Require an enabled independent target before any data operation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Reject data operations without a configured backup host
+      ansible.builtin.assert:
+        that:
+          - groups.get('backup_server', []) | length == 1
+          - backup_target.enabled | default(false) | bool
+          - backup_target.host in groups.get('backup_server', [])
+        fail_msg: Configure and enable an independent backup_server before backup, restore or migration; empty HA deployment can proceed without it.
+
+- name: Run a database data operation
+  hosts: backup_server
+  become: true
+  gather_facts: false
+  vars:
+    project_root: "{{ playbook_dir | dirname | dirname }}"
+    private_dir: "{{ project_root }}/.local"
+    deployment_root: /opt/one-postgres-ha
+    ha_data_operation: backup
+    ha_data_database: one_minihouse
+  tasks:
+    - name: Validate the operation
+      ansible.builtin.assert:
+        that:
+          - ha_data_operation in ['backup', 'restore-test', 'migrate-plan', 'migrate-apply', 'rollback']
+          - ha_data_database in ['one_minihouse', 'nexus']
+        fail_msg: Unsupported data operation or database.
+
+    - name: Prepare private data tooling
+      ansible.builtin.include_tasks: prepare.yml
+
+    - name: Run backup or isolated restore
+      ansible.builtin.command:
+        argv:
+          - /bin/bash
+          - "{{ deployment_root }}/data/data.sh"
+          - "{{ ha_data_operation }}"
+      when: ha_data_operation in ['backup', 'restore-test']
+      changed_when: true
+      no_log: true
+
+    - name: Run migration rehearsal
+      ansible.builtin.command:
+        argv:
+          - /bin/bash
+          - "{{ deployment_root }}/data/data.sh"
+          - migrate-plan
+          - "{{ ha_data_database }}"
+      when: ha_data_operation == 'migrate-plan'
+      changed_when: true
+      no_log: true
+
+    - name: Perform the guarded migration
+      ansible.builtin.include_tasks: migrate-apply-tasks.yml
+      when: ha_data_operation == 'migrate-apply'
+
+    - name: Restore pre-write source access
+      ansible.builtin.include_tasks: rollback-tasks.yml
+      when: ha_data_operation == 'rollback'
+
+    - name: Report the private result location
+      ansible.builtin.debug:
+        msg: "{{ ha_data_operation }} finished. Evidence and recovery state are on backup_server under backup_target.path; no secrets are printed."

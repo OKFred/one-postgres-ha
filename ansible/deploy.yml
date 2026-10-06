@@ -1,0 +1,150 @@
+- name: Check every node before changing the deployment
+  ansible.builtin.import_playbook: preflight.yml
+
+- name: Inspect whether this is an initial cluster start
+  hosts: core_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: inspect-start
+  roles: [cluster]
+
+- name: Prepare all approved existing nodes
+  hosts: pg_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: prepare
+  pre_tasks:
+    - name: New replicas must use the isolated add-node operation
+      ansible.builtin.assert:
+        that: inventory_hostname in groups.core_nodes or pg_ha_marker.stat.exists
+        fail_msg: Deploy does not enroll new replicas. Use add-node for this host.
+    - name: Pending additions must be completed with add-node
+      ansible.builtin.assert:
+        that: not pg_ha_pending_marker.stat.exists
+        fail_msg: A replica addition is pending; use add-node to finish it safely.
+  roles: [cluster]
+  post_tasks:
+    - name: Copy the locked application image build context
+      ansible.builtin.copy:
+        src: "{{ project_root }}/images/postgres/"
+        dest: "{{ deployment_root }}/images/postgres/"
+        owner: root
+        group: root
+        mode: preserve
+    - name: Build the PostgreSQL image from the locked base
+      ansible.builtin.command:
+        argv: [docker, compose, --env-file, .env, build, postgres]
+        chdir: "{{ deployment_root }}"
+      changed_when: true
+    - name: Inspect whether PostgreSQL container reconciliation is needed
+      ansible.builtin.include_role:
+        name: cluster
+        tasks_from: inspect-update
+
+- name: Start all three initial etcd members before waiting for quorum
+  hosts: core_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Start initial etcd without a per-host health wait
+      ansible.builtin.command:
+        argv: [docker, compose, --env-file, .env, up, -d, --no-build, etcd]
+        chdir: "{{ deployment_root }}"
+      when: hostvars[groups.core_nodes[0]].pg_ha_initial_etcd_start
+      changed_when: true
+
+- name: Update existing etcd members sequentially
+  hosts: core_nodes
+  serial: 1
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: update-etcd
+  roles: [cluster]
+
+- name: Require etcd quorum and inspect the existing initialization key
+  hosts: core_nodes[0]
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: inspect-dcs
+  roles: [cluster]
+
+- name: Bootstrap exactly one PostgreSQL primary
+  hosts: core_nodes[0]
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: start-postgres
+  roles: [cluster]
+  tasks:
+    - name: Wait for the first primary role, not a synchronous SQL write
+      ansible.builtin.uri:
+        url: "http://{{ node_ip }}:{{ patroni_port }}/primary"
+        status_code: 200
+      register: pg_ha_first_primary
+      until: pg_ha_first_primary.status | default(0) == 200
+      retries: 120
+      delay: 2
+      when: pg_ha_new_cluster
+
+- name: Build the initial replicas after primary bootstrap
+  hosts: "core_nodes:!{{ groups.get('core_nodes', ['__missing_core__'])[0] }}"
+  serial: 1
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: start-postgres
+  roles: [cluster]
+
+- name: Discover the current leader after replicas are available
+  hosts: core_nodes[0]
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: read-cluster
+  roles: [cluster]
+
+- name: Update existing replicas one at a time
+  hosts: pg_nodes
+  serial: 1
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: update-replica
+  roles: [cluster]
+
+- name: Switch the leader before updating the former primary
+  hosts: core_nodes[0]
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: update-primary
+  roles: [cluster]
+
+- name: Start the existing proxies and host VIP services
+  hosts: core_nodes
+  serial: 1
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: start-proxy
+  roles: [cluster]
+
+- name: Check the running cluster invariants
+  ansible.builtin.import_playbook: verify.yml
+- name: Install scheduled backup and restore tests
+  ansible.builtin.import_playbook: data/install-timers.yml

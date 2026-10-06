@@ -1,0 +1,12 @@
+[Unit]
+Description=Allowlist for one-postgres-ha ports
+After=network-online.target
+Wants=network-online.target
+Before=docker.service keepalived.service
+[Service]
+Type=oneshot
+ExecStart={{ deployment_root }}/bin/firewall.sh
+ExecReload={{ deployment_root }}/bin/firewall.sh
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
