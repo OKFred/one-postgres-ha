@@ -1,0 +1,21 @@
+- name: Require an explicit supported application image mode
+  ansible.builtin.assert:
+    that:
+      - postgres_image_mode in ['source', 'prebuilt']
+      - postgres_ha_image is string
+    fail_msg: postgres_image_mode must be source or prebuilt, and postgres_ha_image must be a string.
+
+- name: Require an immutable registry image in prebuilt mode
+  ansible.builtin.assert:
+    that:
+      - postgres_ha_image is match('^[a-z0-9][a-z0-9.:_-]*/[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[a-f0-9]{64}$')
+      - "'.' in postgres_ha_image.split('/')[0] or ':' in postgres_ha_image.split('/')[0] or postgres_ha_image.split('/')[0] == 'localhost'"
+    fail_msg: prebuilt requires postgres_ha_image as registry/repository@sha256:digest, without credentials or whitespace.
+  when: postgres_image_mode == 'prebuilt'
+
+- name: Restrict source builds to local image tags
+  ansible.builtin.assert:
+    that:
+      - postgres_ha_image | length == 0 or postgres_ha_image is match('^[a-z0-9][a-z0-9._-]*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$')
+    fail_msg: source builds accept an empty postgres_ha_image or a local image tag. Use prebuilt for registry images.
+  when: postgres_image_mode == 'source'

@@ -28,18 +28,10 @@
         fail_msg: A replica addition is pending; use add-node to finish it safely.
   roles: [cluster]
   post_tasks:
-    - name: Copy the locked application image build context
-      ansible.builtin.copy:
-        src: "{{ project_root }}/images/postgres/"
-        dest: "{{ deployment_root }}/images/postgres/"
-        owner: root
-        group: root
-        mode: preserve
-    - name: Build the PostgreSQL image from the locked base
-      ansible.builtin.command:
-        argv: [docker, compose, --env-file, .env, build, postgres]
-        chdir: "{{ deployment_root }}"
-      changed_when: true
+    - name: Prepare the configured application image
+      ansible.builtin.include_role:
+        name: cluster
+        tasks_from: prepare-image
     - name: Inspect whether PostgreSQL container reconciliation is needed
       ansible.builtin.include_role:
         name: cluster

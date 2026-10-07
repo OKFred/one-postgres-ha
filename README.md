@@ -96,6 +96,43 @@ deploy 准备目录、文件权限、专属防火墙规则和宿主 Keepalived�
 Compose 管理单台宿主机。跨机器启动顺序、滚动更新和验收由 Ansible 完成。
 Keepalived 是宿主机服务，所以完整首次部署需要 ops.sh deploy。
 
+## 使用预构建镜像
+
+不需要 Docker Swarm。控制端仍通过 Ansible 在三台服务器上分别运行 Compose，
+按顺序建立 etcd 仲裁、主库和副本，并配置宿主机 Keepalived 与 watchdog。
+
+默认 `postgres_image_mode: source` 在节点构建 PostgreSQL＋Patroni 镜像。
+已有发布镜像时，在私有 inventory 的 `all.vars` 中改为：
+
+```yaml
+postgres_image_mode: prebuilt
+postgres_ha_image: registry.example.com/your-namespace/one-postgres-ha@sha256:<64位digest>
+```
+
+控制端也可直接拉取已发布的 Ansible 工具镜像，再执行同一个安装入口：
+
+```bash
+export HA_TOOLS_IMAGE='registry.example.com/your-namespace/one-postgres-ha-tools@sha256:<64位digest>'
+bash install.sh
+```
+
+用实际发布的 digest 替换占位符。注册表镜像必须按 digest 固定；只写 tag 会被拒绝。
+工具镜像已缓存时直接使用，缺少时拉取。节点的部署和 `add-node` 都会拉取 PostgreSQL 镜像，
+不复制构建目录、不在目标服务器编译。镜像失败时停止部署，不切换到其他版本。
+使用私有仓库时，控制端和各目标节点须提前完成 `docker login`，密码通过 `--password-stdin` 输入；
+项目不分发注册表密码。etcd、HAProxy 继续使用已有固定 digest。
+
+在发布机器登录 Registry 后，使用下面的脚本发布两个自建镜像：
+
+```bash
+docker login YOUR_REGISTRY
+bash scripts/publish-images.sh YOUR_REGISTRY/YOUR_NAMESPACE          # 预览
+bash scripts/publish-images.sh YOUR_REGISTRY/YOUR_NAMESPACE --push   # AMD64、ARM64
+```
+
+发布使用已提交 HEAD，标签包含版本和提交号，拒绝覆盖已有标签。
+摘要和部署片段保存在忽略的 `.local/publish/`，详细步骤见 [镜像发布与拉取部署](docs/images.md)。
+
 ## 清理后重新安装
 
 在控制端的项目目录运行。清理范围为私有 inventory 中全部 `pg_nodes`，

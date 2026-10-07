@@ -143,8 +143,19 @@ if [[ "$READ_ONLY" != true ]]; then
   flock -n 9 || die 'Another operation is running'
   check_previous_controllers
 fi
+TOOLS_REGISTRY="${TOOLS_IMAGE%%/*}"
+TOOLS_PREBUILT=false
+if [[ "$TOOLS_IMAGE" == */* && ( "$TOOLS_REGISTRY" == *.* || "$TOOLS_REGISTRY" == *:* || "$TOOLS_REGISTRY" == localhost ) ]]; then
+  TOOLS_PREBUILT=true
+  [[ "$TOOLS_IMAGE" =~ ^[a-z0-9][a-z0-9.:_-]*/[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[a-f0-9]{64}$ ]] \
+    || die 'Registry HA_TOOLS_IMAGE must use a sha256 digest, without credentials or whitespace'
+fi
 if [[ "$COMMAND" == tools ]] || ! docker image inspect "$TOOLS_IMAGE" >/dev/null 2>&1; then
-  docker build --pull=false -f "$ROOT/images/tools/Dockerfile" -t "$TOOLS_IMAGE" "$ROOT"
+  if [[ "$TOOLS_PREBUILT" == true ]]; then
+    docker pull "$TOOLS_IMAGE"
+  else
+    docker build --pull=false -f "$ROOT/images/tools/Dockerfile" -t "$TOOLS_IMAGE" "$ROOT"
+  fi
 fi
 [[ "$COMMAND" != tools ]] || exit 0
 RUN=(docker run --rm --init --read-only --tmpfs '/tmp:rw,exec,nosuid,size=256m'

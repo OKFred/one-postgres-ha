@@ -6,6 +6,9 @@ all:
     deployment_root: /opt/one-postgres-ha
     deployment_environment: production
     expected_architecture: aarch64
+    # source builds on each node; prebuilt pulls an immutable registry image.
+    postgres_image_mode: source
+    postgres_ha_image: ''
     vip_address: 192.0.2.20
     vip_prefix: 24
     vip_router_id: 51

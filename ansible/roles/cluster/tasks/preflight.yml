@@ -1,3 +1,6 @@
+- name: Validate application image configuration before inspecting hosts
+  ansible.builtin.include_tasks: validate-image.yml
+
 - name: Validate inventory invariants
   ansible.builtin.assert:
     that:

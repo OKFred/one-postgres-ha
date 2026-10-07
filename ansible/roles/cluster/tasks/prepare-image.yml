@@ -1,0 +1,25 @@
+- name: Validate the requested image before copying or pulling
+  ansible.builtin.include_tasks: validate-image.yml
+
+- name: Copy the locked application image build context
+  ansible.builtin.copy:
+    src: "{{ project_root }}/images/postgres/"
+    dest: "{{ deployment_root }}/images/postgres/"
+    owner: root
+    group: root
+    mode: preserve
+  when: postgres_image_mode == 'source'
+
+- name: Build the PostgreSQL image from the locked base
+  ansible.builtin.command:
+    argv: [docker, compose, --env-file, .env, build, postgres]
+    chdir: "{{ deployment_root }}"
+  changed_when: true
+  when: postgres_image_mode == 'source'
+
+- name: Pull the immutable PostgreSQL image before changing containers
+  ansible.builtin.command:
+    argv: [docker, compose, --env-file, .env, pull, postgres]
+    chdir: "{{ deployment_root }}"
+  changed_when: true
+  when: postgres_image_mode == 'prebuilt'

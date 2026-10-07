@@ -23,7 +23,9 @@ cp -R ansible config images .ansible-lint .yamllint.yml "$lint_root/"
   done
 )
 bash tests/test-cli.sh
+bash tests/test-publish-images.sh
 bash tests/test-entrypoints.sh
+bash tests/test-prebuilt-images.sh
 bash tests/test-cleanup-node.sh
 bash tests/test-secrets.sh
 bash tests/test-controller.sh
