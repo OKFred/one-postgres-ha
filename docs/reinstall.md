@@ -6,9 +6,9 @@
 Windows 使用 WSL。根目录 `install.sh`、`cleanup.sh` 复用 `ops.sh`，
 Ansible 在工具容器中通过 SSH 操作 inventory 内的服务器。
 
-首次配置仍需填写 `.local/inventory.yml`、提供 SSH 身份，并把核实过的主机指纹保存为
-`.local/known_hosts`。真实配置和凭据不包含在部署包里。
-`ssh-keyscan` 得到的指纹须与每台主机控制台的主机公钥指纹核对后才能信任。
+首次使用 `bash ops.sh configure` 生成 `.local/inventory.yml`、SSH 身份引用及
+核实过的 `.local/known_hosts`，然后运行安装入口。真实配置和凭据不包含在部署包里。
+向导只读检测节点，主机指纹须与每台控制台核对；详见 [首次配置向导](configure.md)。
 
 ## 一键安装
 
@@ -16,7 +16,7 @@ Ansible 在工具容器中通过 SSH 操作 inventory 内的服务器。
 bash install.sh
 ```
 
-自动构建缺少的工具镜像，依次执行：
+缺少所选工具镜像时自动构建或拉取，依次执行：
 
 1. `secrets`：生成缺失的密码和证书，保留已有值。
 2. `plan`：完整预检后展示配置与部署计划。
@@ -113,7 +113,13 @@ SSH 配置、原密码和 CA 可直接沿用。新集群为空，具有新的 Po
 和 etcd 数据；旧验收记录不能证明新集群通过故障测试。业务接入前重新验收，并完成独立备份恢复演练。
 
 如果项目源码也删除了，重新下载仓库或部署包，恢复 `.local/` 后再运行安装脚本。
-若 `.local/` 也丢失且所有节点 PG/etcd 数据已删除，可以重新填写配置并生成新凭据。
+若 `.local/` 也丢失且所有节点 PG/etcd 数据已删除，可以从零配置并生成新凭据：
+
+```bash
+bash ops.sh configure
+bash install.sh
+```
+
 若旧数据仍在，应恢复旧凭据；安装入口不提供丢失 DCS 的自动接管或全节点冷启动恢复。
 
 自定义 inventory：

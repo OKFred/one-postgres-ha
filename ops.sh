@@ -3,12 +3,11 @@ set -Eeuo pipefail
 umask 077
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 INVENTORY="${HA_INVENTORY:-$ROOT/.local/inventory.yml}"
-TOOLS_IMAGE="${HA_TOOLS_IMAGE:-one-postgres-ha-tools:0.1.0}"
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
 usage() {
   cat <<'USAGE'
 Usage: bash ops.sh [--inventory FILE] COMMAND [ARGUMENTS]
-  preflight | plan | deploy | status | verify | secrets | tools | check
+  configure | preflight | plan | deploy | status | verify | secrets | tools | check
   backup | restore-test | switchover | rollback [one_minihouse|nexus]
   migrate-plan|migrate-apply [one_minihouse|nexus]
   add-node NODE [--plan]
@@ -18,6 +17,7 @@ Usage: bash ops.sh [--inventory FILE] COMMAND [ARGUMENTS]
 
 Inventory defaults to .local/inventory.yml. Windows: run through WSL.
 preflight/plan read the site; secrets prepares local credentials, never resets them.
+configure interactively creates fresh private configuration; it never deploys services.
 deploy prepares hosts and starts the cluster; it does not migrate business databases.
 install runs secrets, plan, deploy, status and verify under one lock.
 cleanup previews by default; applying deletes this cluster's PostgreSQL/etcd data.
@@ -38,6 +38,15 @@ CLEANUP_CONFIRM=''
 CONFIRMATION=DELETE-ONE-POSTGRES-HA
 case "$COMMAND" in
   help|-h|--help) usage; exit 0 ;;
+  configure)
+    if [[ ${1:-} == --help || ${1:-} == -h ]]; then
+      [[ $# -eq 1 ]] || die 'Unexpected arguments'
+      exec bash "$ROOT/scripts/configure.sh" --help
+    fi
+    [[ $# -eq 0 ]] || die 'configure accepts no arguments'
+    [[ "$INVENTORY" == "$ROOT/.local/inventory.yml" ]] || die 'configure writes only .local/inventory.yml; do not specify another inventory'
+    [[ -t 0 && -t 1 ]] || die 'configure requires an interactive terminal; Windows: use WSL'
+    ;;
   tools|check|secrets|package) [[ $# -eq 0 ]] || die 'Unexpected arguments' ;;
   preflight|plan|status|verify|deploy|switchover)
     [[ $# -eq 0 ]] || die 'Unexpected arguments'
@@ -88,6 +97,39 @@ case "$COMMAND" in
     ;;
   *) die "Unknown command: $COMMAND" ;;
 esac
+# Parse the wizard's private settings as data, never execute a shell config file.
+[[ ! -L "$ROOT/.local" ]] || die 'Private directory must not be a symlink'
+CONTROLLER_ENV="$ROOT/.local/controller.env"
+if [[ -e "$CONTROLLER_ENV" || -L "$CONTROLLER_ENV" ]]; then
+  [[ -f "$CONTROLLER_ENV" && ! -L "$CONTROLLER_ENV" ]] || die 'Invalid .local/controller.env'
+  declare -A CONTROLLER_SEEN=()
+  while IFS= read -r setting || [[ -n "$setting" ]]; do
+    [[ -n "$setting" && "$setting" != \#* ]] || continue
+    [[ "$setting" != *$'\r'* && "$setting" == *=* ]] || die 'Invalid controller setting'
+    key=${setting%%=*}
+    value=${setting#*=}
+    [[ "$key" == HA_TOOLS_IMAGE || "$key" == HA_SSH_KEY ]] || die 'Unknown controller setting'
+    [[ -z ${CONTROLLER_SEEN[$key]:-} ]] || die 'Duplicate controller setting'
+    CONTROLLER_SEEN[$key]=1
+    case "$key" in
+      HA_TOOLS_IMAGE)
+        [[ "$value" =~ ^[a-z0-9][a-z0-9_.-]*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$ ||
+           "$value" =~ ^[a-z0-9][a-z0-9.:_-]*/[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[a-f0-9]{64}$ ]] || die 'Invalid saved tools image'
+        if [[ "$value" == */* ]]; then
+          registry=${value%%/*}
+          [[ "$registry" == *.* || "$registry" == *:* || "$registry" == localhost ]] || die 'Saved tools image requires a registry hostname'
+        fi
+        HA_TOOLS_IMAGE=${HA_TOOLS_IMAGE:-$value}
+        ;;
+      HA_SSH_KEY)
+        [[ "$value" == /* && "$value" != *$'\t'* && "$value" != *,* ]] || die 'Saved HA_SSH_KEY must be an absolute path without tabs or commas'
+        HA_SSH_KEY=${HA_SSH_KEY:-$value}
+        ;;
+      *) die 'Unknown controller setting' ;;
+    esac
+  done <"$CONTROLLER_ENV"
+fi
+TOOLS_IMAGE="${HA_TOOLS_IMAGE:-one-postgres-ha-tools:0.1.0}"
 if [[ "$COMMAND" == package ]]; then
   command -v git >/dev/null || die 'git is required'
   git -C "$ROOT" diff --quiet HEAD || die 'Commit tracked changes before packaging'
@@ -100,7 +142,7 @@ if [[ "$COMMAND" == package ]]; then
   printf 'Deployment bundle: %s\n' "$ARCHIVE"; exit 0
 fi
 command -v docker >/dev/null || die 'Docker CLI is required; enable Docker Desktop WSL integration on Windows'
-if [[ "$COMMAND" != tools && "$COMMAND" != check ]]; then
+if [[ "$COMMAND" != tools && "$COMMAND" != check && "$COMMAND" != configure ]]; then
   [[ -f "$INVENTORY" ]] || die "Missing inventory: $INVENTORY; copy ansible/inventory.example.yml to .local/inventory.yml"
   INVENTORY="$(cd -- "$(dirname -- "$INVENTORY")" && pwd -P)/$(basename -- "$INVENTORY")"
 fi
@@ -164,6 +206,10 @@ RUN=(docker run --rm --init --read-only --tmpfs '/tmp:rw,exec,nosuid,size=256m'
   -e ANSIBLE_LOCAL_TEMP=/tmp/ansible-local
   -e ANSIBLE_HOME=/tmp/ansible-home
   -e ANSIBLE_CONFIG=/workspace/ansible/ansible.cfg)
+if [[ "$COMMAND" == configure ]]; then
+  RUN+=(--interactive --tty -e "HA_CONFIGURE_TOOLS_IMAGE=$TOOLS_IMAGE")
+  exec 7<&0
+fi
 if [[ "$COMMAND" == check ]]; then
   # Systemd fixtures use a private, root-owned directory under /run.
   RUN+=(--tmpfs '/run:rw,noexec,nosuid,size=16m')
@@ -215,7 +261,12 @@ run_tool() {
     [[ "$state" != running ]] || die 'Previous controller is still running between stages'
     rm -f -- "$TOOL_CID"
   fi
-  "${RUN[@]}" "$@" &
+  if [[ "$COMMAND" == configure ]]; then
+    # Background shell commands otherwise lose stdin; preserve the user's TTY.
+    "${RUN[@]}" "$@" <&7 &
+  else
+    "${RUN[@]}" "$@" &
+  fi
   TOOL_PID=$!
   wait "$TOOL_PID" || result=$?
   TOOL_PID=''
@@ -230,7 +281,9 @@ if [[ "$COMMAND" == install || "$COMMAND" == cleanup ]]; then
   chmod 0600 "$TOOL_DIR/inventory.yml"
   INVENTORY="$TOOL_DIR/inventory.yml"
 fi
-RUN+=(--mount "type=bind,src=$INVENTORY,dst=/inventory.yml,readonly")
+if [[ "$COMMAND" != configure ]]; then
+  RUN+=(--mount "type=bind,src=$INVENTORY,dst=/inventory.yml,readonly")
+fi
 if [[ -f "$ROOT/.local/known_hosts" ]]; then
   RUN+=(--mount "type=bind,src=$ROOT/.local/known_hosts,dst=/tmp/known_hosts,readonly"
     -e 'ANSIBLE_SSH_ARGS=-C -o ControlMaster=auto -o ControlPersist=60s -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/tmp/known_hosts')
@@ -239,12 +292,17 @@ if [[ -n "${HA_SSH_KEY:-}" ]]; then
   [[ -f "$HA_SSH_KEY" ]] || die 'HA_SSH_KEY must point to a private key file'
   RUN+=(--mount "type=bind,src=$HA_SSH_KEY,dst=/ssh-key,readonly"
     -e ANSIBLE_PRIVATE_KEY_FILE=/ssh-key)
+  if [[ "$COMMAND" == configure ]]; then
+    RUN+=(-e HA_CONFIGURE_KEY_PATH=/ssh-key -e "HA_CONFIGURE_KEY_HOST_PATH=$HA_SSH_KEY")
+  fi
 fi
 run_playbook() {
   run_tool "$TOOLS_IMAGE" ansible-playbook -i /inventory.yml "$1" \
     -e project_root=/workspace -e private_dir=/workspace/.local "${@:2}"
 }
-if [[ "$COMMAND" == install ]]; then
+if [[ "$COMMAND" == configure ]]; then
+  run_tool "$TOOLS_IMAGE" bash scripts/configure.sh
+elif [[ "$COMMAND" == install ]]; then
   if [[ "$INSTALL_APPLY" == true ]]; then
     run_tool "$TOOLS_IMAGE" bash scripts/bootstrap-secrets.sh /inventory.yml /workspace/.local/secrets
   fi

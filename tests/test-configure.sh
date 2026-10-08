@@ -1,0 +1,347 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+WORK=$(mktemp -d)
+trap 'rm -rf -- "$WORK"' EXIT
+mkdir -p "$WORK/bin"
+ssh-keygen -q -t ed25519 -N '' -f "$WORK/host-key"
+
+# These tools never open a network connection. Cryptographic fingerprint parsing
+# still uses the real ssh-keygen against a valid key generated for this test.
+cat >"$WORK/bin/ssh-keyscan" <<'MOCK'
+#!/usr/bin/env python3
+import ipaddress, json, os, pathlib, sys
+host = next(value for value in sys.argv[1:] if value.startswith('192.0.2.'))
+ipaddress.ip_address(host)
+with open(os.environ['FIXTURE_CALLS'], 'a') as log:
+    log.write(json.dumps({'tool': 'ssh-keyscan', 'argv': sys.argv[1:]}) + '\n')
+if os.environ.get('FIXTURE_SCAN_FAIL') == host:
+    sys.exit(1)
+if os.environ.get('FIXTURE_SCAN_BAD') == host:
+    print(host, 'ssh-ed25519', 'invalid-public-key')
+    sys.exit(0)
+key = pathlib.Path(os.environ['FIXTURE_HOST_KEY'] + '.pub').read_text().split()
+print(host, key[0], key[1])
+MOCK
+cat >"$WORK/bin/ssh" <<'MOCK'
+#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+host = next(value.rsplit('@', 1)[-1] for value in args
+            if value.rsplit('@', 1)[-1] in ('192.0.2.11', '192.0.2.12', '192.0.2.13'))
+helper = sys.stdin.read()
+with open(os.environ['FIXTURE_CALLS'], 'a') as log:
+    log.write(json.dumps({'tool': 'ssh', 'argv': args, 'helper': helper}) + '\n')
+if os.environ.get('FIXTURE_SSH_FAIL') == host:
+    sys.exit(255)
+if os.environ.get('FIXTURE_PROBE_MODE') == 'malformed':
+    print('unexpected login banner')
+    sys.exit(0)
+probe = dict(node_ip=host, architecture='aarch64', os_id='debian', os_like='',
+             controller_ip='192.0.2.5', interface='eth0', prefix=24,
+             network='192.0.2.0/24', keepalived_version='1:2.3.3-1',
+             docker_compose=True, watchdog=True, systemd_watchdog_usec=0,
+             deployment_exists=False, vip_in_use=False,
+             mounts=[dict(target='/mnt/ssd', fstype='ext4', source='/dev/sda1',
+                          rw=True, local=True, ssd=True,
+                          available_bytes=50000000000, data_exists=False)])
+mode = os.environ.get('FIXTURE_PROBE_MODE', '')
+if mode == 'wrong-types':
+    probe['mounts'] = [None]
+elif mode == 'wrong-architecture':
+    probe['architecture'] = 'x86_64'
+elif mode == 'occupied-vip':
+    probe['vip_in_use'] = True
+elif mode == 'missing-watchdog':
+    probe['watchdog'] = False
+elif mode == 'readonly-mount':
+    probe['mounts'][0]['rw'] = False
+elif mode == 'existing-data':
+    probe['mounts'][0]['data_exists'] = True
+elif mode == 'insufficient-space':
+    probe['mounts'][0]['available_bytes'] = 1000
+elif mode == 'existing-deployment':
+    probe['deployment_exists'] = True
+elif mode == 'missing-compose':
+    probe['docker_compose'] = False
+elif mode == 'inconsistent-version' and host == '192.0.2.13':
+    probe['keepalived_version'] = '1:2.2.8-1'
+elif mode == 'different-controller' and host == '192.0.2.13':
+    probe['controller_ip'] = '192.0.2.6'
+print(json.dumps(probe))
+MOCK
+cat >"$WORK/bin/sshpass" <<'MOCK'
+#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+with open(os.environ['FIXTURE_CALLS'], 'a') as log:
+    log.write(json.dumps({'tool': 'sshpass', 'argv': args}) + '\n')
+if args[0] == '-f':
+    password = pathlib.Path(args[1]).read_text().rstrip('\n')
+    command = args[2:]
+elif args[0] == '-d':
+    password = os.read(int(args[1]), 4096).decode().rstrip('\n')
+    command = args[2:]
+else:
+    sys.exit('Fixture only accepts password files or descriptors')
+if password != os.environ['FIXTURE_PASSWORD']:
+    sys.exit('Fixture password mismatch (value withheld)')
+os.execvp(command[0], command)
+MOCK
+chmod +x "$WORK/bin/"{ssh-keyscan,ssh,sshpass}
+export PATH="$WORK/bin:$PATH" FIXTURE_HOST_KEY="$WORK/host-key"
+export FIXTURE_PASSWORD='isolated fixture password'
+case_number=0
+
+new_case() {
+  case_number=$((case_number + 1))
+  CASE="$WORK/case-$case_number"
+  PROJECT="$CASE/project"
+  mkdir -p "$PROJECT/scripts" "$PROJECT/ansible"
+  cp "$ROOT/scripts/"configure.{sh,py} "$PROJECT/scripts/"
+  cp "$ROOT/ops.sh" "$PROJECT/"
+  cp "$ROOT/ansible/inventory.example.yml" "$PROJECT/ansible/"
+  export FIXTURE_CALLS="$CASE/calls.jsonl"
+  : >"$FIXTURE_CALLS"
+  unset FIXTURE_SCAN_FAIL FIXTURE_SCAN_BAD FIXTURE_SSH_FAIL FIXTURE_PROBE_MODE
+  unset HA_CONFIGURE_KEY_PATH HA_CONFIGURE_KEY_HOST_PATH HA_CONFIGURE_TOOLS_IMAGE
+  unset HA_INVENTORY HA_TOOLS_IMAGE HA_SSH_KEY
+}
+
+write_inputs() {
+  printf '%s\n' 192.0.2.11 "${NODE_TWO:-192.0.2.12}" 192.0.2.13 \
+    "${VIP:-192.0.2.20}" '' "${TRUST:-VERIFY}" >"$CASE/input"
+  if [[ -z ${HA_CONFIGURE_KEY_PATH:-} ]]; then
+    printf '%s\n' "$FIXTURE_PASSWORD" "${PASSWORD_CONFIRM:-$FIXTURE_PASSWORD}" >>"$CASE/input"
+  fi
+  printf '%s\n' "${SSD_PATH:-}" "${RESERVATION:-RESERVED}" "${CLIENT_CIDR:-}" \
+    "${POSTGRES_IMAGE:-}" "${TOOLS_IMAGE:-}" "${SAVE:-SAVE}" >>"$CASE/input"
+}
+
+run_wizard() {
+  bash "$PROJECT/scripts/configure.sh" <"$CASE/input" >"$CASE/output" 2>&1
+}
+
+expect_failure() {
+  local result=0
+  run_wizard || result=$?
+  [[ $result == 2 ]] || {
+    printf 'Expected configure exit 2, got %s\n' "$result" >&2
+    cat "$CASE/output" >&2
+    exit 1
+  }
+  for path in inventory.yml known_hosts controller.env secrets/ssh-password; do
+    [[ ! -e "$PROJECT/.local/$path" ]] || {
+      printf 'Failed configuration published %s\n' "$path" >&2
+      exit 1
+    }
+  done
+  python3 - "$PROJECT" "$FIXTURE_PASSWORD" "$CASE/output" "$FIXTURE_CALLS" <<'PY'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+password = sys.argv[2].encode()
+for path in root.rglob('*'):
+    if path.is_file():
+        assert password not in path.read_bytes(), 'Failed configuration retained a password'
+assert not list(root.glob('.local/configure.*')), 'Failed configuration retained staged inputs'
+for name in sys.argv[3:]:
+    assert password not in pathlib.Path(name).read_bytes(), 'A failure report leaked the password'
+PY
+}
+
+new_case
+TRUST=NO write_inputs
+expect_failure
+! grep -Fq '"tool": "ssh"' "$FIXTURE_CALLS"
+! grep -Fq '"tool": "sshpass"' "$FIXTURE_CALLS"
+
+# Bad addresses are rejected before host trust or SSH authentication.
+for invalid in duplicate malformed vip-on-node; do
+  new_case
+  case "$invalid" in
+    duplicate) NODE_TWO=192.0.2.11 write_inputs ;;
+    malformed) NODE_TWO=999.0.2.12 write_inputs ;;
+    vip-on-node) VIP=192.0.2.11 write_inputs ;;
+  esac
+  expect_failure
+  [[ ! -s "$FIXTURE_CALLS" ]]
+done
+
+new_case
+export FIXTURE_SCAN_FAIL=192.0.2.12
+write_inputs
+expect_failure
+! grep -Fq '"tool": "ssh"' "$FIXTURE_CALLS"
+
+new_case
+export FIXTURE_SCAN_BAD=192.0.2.12
+write_inputs
+expect_failure
+! grep -Fq '"tool": "ssh"' "$FIXTURE_CALLS"
+
+new_case
+PASSWORD_CONFIRM='different fixture password' write_inputs
+expect_failure
+! grep -Fq '"tool": "ssh"' "$FIXTURE_CALLS"
+
+new_case
+export FIXTURE_SSH_FAIL=192.0.2.13
+write_inputs
+expect_failure
+
+# An incomplete or unsuitable inspection must never publish a deployable input.
+for mode in malformed wrong-types wrong-architecture occupied-vip missing-watchdog readonly-mount existing-data insufficient-space existing-deployment missing-compose inconsistent-version different-controller; do
+  new_case
+  export FIXTURE_PROBE_MODE="$mode"
+  write_inputs
+  expect_failure
+done
+
+for rejection in unsafe-path reservation unsafe-client unsigned-image cancelled; do
+  new_case
+  case "$rejection" in
+    unsafe-path) SSD_PATH=/mnt/ssd/../../etc write_inputs ;;
+    reservation) RESERVATION=NO write_inputs ;;
+    unsafe-client) CLIENT_CIDR=0.0.0.0/0 write_inputs ;;
+    unsigned-image) POSTGRES_IMAGE=example.invalid/postgres:latest write_inputs ;;
+    cancelled) SAVE=NO write_inputs ;;
+  esac
+  expect_failure
+done
+
+new_case
+write_inputs
+run_wizard || {
+  cat "$CASE/output" >&2
+  exit 1
+}
+python3 - "$PROJECT" "$FIXTURE_CALLS" "$CASE/output" "$FIXTURE_PASSWORD" <<'PY'
+import json, pathlib, stat, sys, yaml
+root, calls, output = map(pathlib.Path, sys.argv[1:4])
+password = sys.argv[4]
+private = root / '.local'
+inventory = yaml.safe_load((private / 'inventory.yml').read_text())
+variables = inventory['all']['vars']
+nodes = inventory['all']['children']['pg_nodes']['children']['core_nodes']['hosts']
+assert len(nodes) == 3
+assert {item['node_ip'] for item in nodes.values()} == {'192.0.2.11', '192.0.2.12', '192.0.2.13'}
+assert all(item['data_mount'] == '/mnt/ssd' and item['network_interface'] == 'eth0' for item in nodes.values())
+assert all(item['data_root'] == '/mnt/ssd/one-postgres-ha' for item in nodes.values())
+assert variables['ansible_user'] == 'root' and variables['ansible_become'] is False
+assert variables['vip_address'] == '192.0.2.20' and variables['vip_reserved'] is True
+assert variables['keepalived_package_version'] == '1:2.3.3-1'
+assert variables['admin_cidrs'] == ['192.0.2.5/32']
+assert variables['client_cidrs'] == ['192.0.2.0/24']
+assert variables['postgres_image_mode'] == 'source'
+assert variables['backup_target']['enabled'] is False
+assert "private_dir + '/secrets/ssh-password'" in variables['ansible_password']
+assert (private / 'secrets/ssh-password').read_text().rstrip('\n') == password
+for name in ('inventory.yml', 'known_hosts', 'controller.env', 'secrets/ssh-password'):
+    assert stat.S_IMODE((private / name).stat().st_mode) == 0o600, name
+for path in (private, private / 'secrets'):
+    assert stat.S_IMODE(path.stat().st_mode) == 0o700
+known = (private / 'known_hosts').read_text().splitlines()
+assert {line.split()[0] for line in known} == {'192.0.2.11', '192.0.2.12', '192.0.2.13'}
+assert password not in output.read_text() and password not in calls.read_text()
+assert output.read_text().count('SHA256:') == 3, 'Host fingerprints were not displayed'
+records = [json.loads(line) for line in calls.read_text().splitlines()]
+probes = [item for item in records if item['tool'] == 'ssh']
+assert len(probes) == 3
+for item in probes:
+    args = item['argv']
+    assert any('StrictHostKeyChecking=yes' in arg for arg in args)
+    assert any('UserKnownHostsFile=' in arg for arg in args)
+    assert '--probe' in ' '.join(args)
+    assert password not in ' '.join(args) and password not in item['helper']
+assert len(list((private / 'secrets').iterdir())) == 1, 'Wizard generated database credentials or certificates'
+assert not list(private.glob('configure.*'))
+PY
+find "$PROJECT/.local" -type f -exec sha256sum {} + | sort >"$CASE/before"
+: >"$FIXTURE_CALLS"
+result=0
+run_wizard || result=$?
+[[ $result == 2 && ! -s "$FIXTURE_CALLS" ]]
+find "$PROJECT/.local" -type f -exec sha256sum {} + | sort >"$CASE/after"
+cmp "$CASE/before" "$CASE/after"
+
+# Reject linked private state without altering the directory it points to.
+new_case
+mkdir "$CASE/external"
+printf 'unrelated private state\n' >"$CASE/external/marker"
+ln -s "$CASE/external" "$PROJECT/.local"
+write_inputs
+expect_failure
+[[ ! -s "$FIXTURE_CALLS" ]]
+cmp "$CASE/external/marker" <(printf 'unrelated private state\n')
+
+# Key authentication never creates a password file and retains the host-side path.
+new_case
+cp "$WORK/host-key" "$CASE/client-key"
+export HA_CONFIGURE_KEY_PATH="$CASE/client-key" HA_CONFIGURE_KEY_HOST_PATH=/home/deploy/.ssh/fixture-key
+export HA_CONFIGURE_TOOLS_IMAGE='example.invalid/tools@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+write_inputs
+run_wizard || {
+  cat "$CASE/output" >&2
+  exit 1
+}
+python3 - "$PROJECT" "$FIXTURE_CALLS" <<'PY'
+import json, pathlib, sys, yaml
+private = pathlib.Path(sys.argv[1]) / '.local'
+variables = yaml.safe_load((private / 'inventory.yml').read_text())['all']['vars']
+assert not (private / 'secrets/ssh-password').exists()
+assert 'ansible_password' not in variables
+assert '/home/deploy/.ssh/fixture-key' in (private / 'controller.env').read_text()
+assert not any(json.loads(line)['tool'] == 'sshpass' for line in pathlib.Path(sys.argv[2]).read_text().splitlines())
+PY
+
+# The public entry point requires a terminal rather than silently consuming
+# piped credentials. Existing CLI fixture tests cover other operation routing.
+new_case
+if bash "$PROJECT/ops.sh" configure </dev/null >"$CASE/output" 2>&1; then
+  echo 'Non-terminal configure was accepted' >&2
+  exit 1
+fi
+[[ ! -s "$FIXTURE_CALLS" && ! -e "$PROJECT/.local/inventory.yml" ]]
+
+# Exercise the public routing under a real pseudo-terminal. Docker is mocked,
+# including the interactive child, so stdin cannot accidentally become /dev/null
+# when ops.sh starts the controller client in the background.
+cat >"$WORK/bin/docker" <<'MOCK'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+case "$1 ${2:-}" in
+  'image inspect') exit 0 ;;
+  'container inspect') printf 'false\n'; exit 0 ;;
+  'container ls') exit 0 ;;
+esac
+[[ $1 == run ]] || exit 0
+[[ -t 0 && -t 1 ]] || { echo 'Interactive controller lost its terminal' >&2; exit 1; }
+printf '%s\0' "$@" >"$FIXTURE_DOCKER_ARGS"
+while (($#)); do
+  if [[ $1 == --cidfile ]]; then printf '%064d' 1 >"$2"; break; fi
+  shift
+done
+if flock -n "$FIXTURE_PROJECT/.local/operations.lock" true; then
+  echo 'Configure did not hold the shared operations lock' >&2; exit 1
+fi
+IFS= read -rt 5 answer
+[[ $answer == CONFIGURE-STDIN-FIXTURE ]] || exit 1
+printf 'INTERACTIVE_INPUT_FORWARDED\n'
+MOCK
+chmod +x "$WORK/bin/docker"
+export FIXTURE_DOCKER_ARGS="$CASE/docker-args" FIXTURE_PROJECT="$PROJECT"
+printf 'CONFIGURE-STDIN-FIXTURE\n' | script -qec "bash $PROJECT/ops.sh configure" /dev/null >"$CASE/tty-output" 2>&1
+grep -Fq INTERACTIVE_INPUT_FORWARDED "$CASE/tty-output"
+python3 - "$FIXTURE_DOCKER_ARGS" "$PROJECT" <<'PY'
+import pathlib, sys
+args = pathlib.Path(sys.argv[1]).read_bytes().decode().split('\0')[:-1]
+assert '--interactive' in args and '--tty' in args
+assert '--read-only' in args
+assert args[-3:] == ['one-postgres-ha-tools:0.1.0', 'bash', 'scripts/configure.sh']
+assert not any('dst=/inventory.yml' in arg for arg in args)
+root = pathlib.Path(sys.argv[2])
+assert not list(root.glob('.local/tool.*')), 'Finished controller retained its lifecycle directory'
+assert not (root / '.local/inventory.yml').exists(), 'Routing created an inventory without running the wizard'
+PY
+
+echo 'PASS: configure trust gating, input/probe validation, atomic output, secret handling, key authentication and no-overwrite'

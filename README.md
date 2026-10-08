@@ -47,18 +47,22 @@ Debian 13 ARM64 首次缺少 Docker 时，在目标机器上先运行：
 它为两个服务安装 SSD 挂载依赖。已准备的主机重复执行会补齐并验证依赖，只重载 systemd，不重启运行中的服务。
 已有 Docker 安装、未知配置或数据需要单独检查，脚本会停止。它不分区、不格式化，也不改 watchdog。
 
-复制 ansible/inventory.example.yml 到忽略的 .local/inventory.yml，填写真实节点、网络、
-SSD 路径、已保留的 VIP、Keepalived 软件包版本和备份目标。
-SSH 主机指纹放在 .local/known_hosts；私钥通过 HA_SSH_KEY 指定。
-使用 SSH 密码时，可在私有 inventory 的 `ansible_password` 中引用 `.local/` 下的密码文件，
-例如 `"{{ lookup('ansible.builtin.file', private_dir + '/secrets/ssh-password') }}"`；工具容器包含 sshpass。
-不得把真实 inventory、密码、密钥和备份加入 Git。
-
-配置完成后，一条命令安装并验收：
+首次使用配置向导，再安装并验收：
 
 ```bash
+bash ops.sh configure
 bash install.sh
 ```
+
+向导集中询问三台节点 IP、VIP、SSH 身份和共用 SSD 挂载路径，
+只读检测主机、网卡、Keepalived 版本及控制端管理来源，生成私有配置。
+SSH 指纹须与各主机控制台核对，VIP 须自行预留；确认后才保存。
+默认在节点构建 PostgreSQL 镜像，也可填写预构建镜像的固定 digest。
+备份初始关闭，接入业务前另行配置并验收。
+
+向导只用于首次配置，拒绝覆盖已有 inventory、主机指纹、控制端环境文件及凭据。
+使用私钥时先设置 `HA_SSH_KEY`；默认支持三台共用的 SSH 密码，输入不会显示。
+全部现场输入保存到忽略的 `.local/`。详细说明与手动配置方法见 [首次配置向导](docs/configure.md)。
 
 已有主机保留 Docker、SSD 挂载和 watchdog 的准备工作即可。脚本生成缺少的凭据，
 保留已有凭据，运行预检、计划、部署、状态和验收；中途失败立即停止。
@@ -160,7 +164,7 @@ bash cleanup.sh --apply --confirm DELETE-ONE-POSTGRES-HA
 
 两个脚本均支持 `--inventory FILE`，默认使用 `.local/inventory.yml`。
 若系统或 SSD 挂载也被删除，先按“准备与启动”恢复宿主条件。
-若控制端 `.local/` 也被删除，先恢复或重新填写 inventory、SSH 凭据和核实过的主机指纹。
+若控制端 `.local/` 也被删除且各节点 PG/etcd 数据已清空，重新运行 `bash ops.sh configure`。
 旧 PG/etcd 数据仍在时必须恢复匹配的旧 CA/密码，不能靠重新生成凭据接管旧库。
 
 详细范围和失败处理见 [清理与重装](docs/reinstall.md)。
