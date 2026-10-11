@@ -102,6 +102,8 @@ Keepalived 是宿主机服务，所以完整首次部署需要 ops.sh deploy。
 
 ## 使用预构建镜像
 
+可直接使用 [Docker Hub 预构建镜像](PREBUILT-IMAGES.md)，其中记录已发布镜像的固定摘要和配置向导填写方式。
+
 不需要 Docker Swarm。控制端仍通过 Ansible 在三台服务器上分别运行 Compose，
 按顺序建立 etcd 仲裁、主库和副本，并配置宿主机 Keepalived 与 watchdog。
 
