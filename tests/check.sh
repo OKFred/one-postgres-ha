@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 cd "$(dirname "$0")/.."
-mapfile -d '' scripts < <(find ops.sh install.sh uninstall.sh scripts images tests -type f -name '*.sh' -print0)
+mapfile -d '' scripts < <(find ops.sh menu.sh install.sh uninstall.sh scripts images tests -type f -name '*.sh' -print0)
 for script in "${scripts[@]}"; do bash -n "$script"; done
 shellcheck -S warning "${scripts[@]}"
 yamllint docker-compose.yml
@@ -28,6 +28,7 @@ python3 -B tests/test-configure-probe.py
 bash tests/test-controller-settings.sh
 bash tests/test-publish-images.sh
 bash tests/test-entrypoints.sh
+bash tests/test-menu.sh
 bash tests/test-prebuilt-images.sh
 bash tests/test-cleanup-node.sh
 bash tests/test-retained-recovery.sh

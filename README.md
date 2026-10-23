@@ -189,6 +189,22 @@ bash uninstall.sh --apply --purge-data --confirm DELETE-ONE-POSTGRES-HA
 
 ## 日常操作
 
+可在控制端使用中文菜单：
+
+```bash
+bash menu.sh
+```
+
+菜单包含配置、安装预览／执行、状态、验收、节点维护、全实例备份、隔离恢复和两档卸载。
+安装仍需输入 `INSTALL`；卸载仍需原入口要求的确认令牌，菜单不代填。
+新增副本、切主、备份与恢复演练需额外输入 `APPLY`，操作失败后显示退出码并返回菜单。
+菜单可从其他工作目录启动，默认使用本项目 `.local/`；显式设置 `HA_INVENTORY` 时沿用既有行为。
+Windows 请在 WSL 中运行。
+
+节点菜单支持新增已登记的 PG 副本和受控切主。当前没有受控移除节点命令，
+菜单会说明这一限制，不会直接删除 inventory 节点或改动 etcd 成员。
+命令行入口仍可用于自动化：
+
     bash ops.sh backup
     bash ops.sh restore-test
     bash ops.sh add-node armbian-04 --plan
