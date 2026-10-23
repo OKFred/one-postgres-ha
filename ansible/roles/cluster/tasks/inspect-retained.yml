@@ -1,0 +1,35 @@
+- name: Build the fixed retained-data recovery arguments
+  ansible.builtin.set_fact:
+    pg_ha_retained_arguments:
+      - --deployment-root
+      - "{{ deployment_root }}"
+      - --data-root
+      - "{{ data_root }}"
+      - --data-mount
+      - "{{ data_mount }}"
+      - --cluster-name
+      - "{{ cluster_name }}"
+      - --node-name
+      - "{{ node_name }}"
+      - --node-ip
+      - "{{ node_ip }}"
+      - --compose-project
+      - "{{ compose_project_name }}"
+      - --watchdog-device
+      - "{{ watchdog_device }}"
+      - --watchdog-gid
+      - "{{ watchdog_gid | string }}"
+      - --image
+      - "{{ pg_ha_desired_image.stdout | trim }}"
+
+- name: Verify retained-data identity without starting PostgreSQL
+  ansible.builtin.command:
+    argv: >-
+      {{ ['python3', deployment_root + '/bin/retained-state.py', 'probe']
+      + pg_ha_retained_arguments + (['--core'] if inventory_hostname in groups.core_nodes else []) }}
+  register: pg_ha_retained_probe
+  changed_when: false
+
+- name: Remember this member's protected recovery state
+  ansible.builtin.set_fact:
+    pg_ha_retained_state: "{{ pg_ha_retained_probe.stdout | from_json }}"

@@ -27,6 +27,12 @@ if name=='findmnt':
     print(json.dumps({'filesystems':state['mounts']}))
 elif name=='docker':
     if args==['info','--format','{{.DockerRootDir}}']: print('/unrelated-docker-storage')
+    elif args[0]=='run':
+        assert '--read-only' in args and '--network' in args and args[args.index('--network')+1]=='none'
+        assert args[args.index('--entrypoint')+1]=='/usr/lib/postgresql/18/bin/pg_controldata'
+        assert args[args.index('--mount')+1].endswith(',dst=/var/lib/postgresql/data,readonly')
+        print('Database system identifier: 1234567890123456789')
+        print('Database cluster state: shut down')
     elif args==['ps','--all','--quiet','--no-trunc']: print('\\n'.join(obj['Id'] for obj in state['containers']))
     elif args[:2]==['image','inspect']: print(json.dumps({'/var/lib/postgresql':{}}))
     elif args[:2]==['volume','inspect']: print(json.dumps([state['volumes'][args[2]]]))
@@ -90,7 +96,8 @@ stub.chmod(0o755)
 for name in ['docker','findmnt','systemctl','iptables','ip6tables','udevadm']: (tools/name).symlink_to(stub)
 cases=['good','bad_marker','linked_root','nested_mount','foreign_bind','foreign_alias','foreign_root','foreign_volume','extra_volume',
        'duplicate_bind','bad_permissions','bad_udev','wrong_watchdog','short_identity','forced_stop','image_volume','partial_missing','empty',
-       'core01','core02','core03','legacy','bad_firewall_unit','bad_dependency','linked_dependency','linked_dependency_directory']
+       'core01','core02','core03','legacy','bad_firewall_unit','bad_dependency','linked_dependency','linked_dependency_directory',
+       'keep_data','keep_empty']
 for case in cases:
     scenario=work/case
     scenario.mkdir()
@@ -119,6 +126,14 @@ for case in cases:
     pg_version=data/'postgres/PG_VERSION'
     pg_version.write_text('18\n'); pg_version.chmod(0o600)
     subprocess.check_call(['chown','999:999',str(pg_version)])
+    (data/'postgres/fixture-data').write_bytes(b'postgres data preserved\x00\xff')
+    (data/'postgres/global').mkdir()
+    control=data/'postgres/global/pg_control'
+    control.write_bytes(b'fixture control data')
+    subprocess.check_call(['chown','999:999',str(control)])
+    (data/'etcd/fixture-data').write_bytes(b'etcd data preserved\x00\xff')
+    (deployment/'secrets/fixture-password').write_text('fixture-only-password\n')
+    (deployment/'secrets/fixture-password').chmod(0o600)
     (scenario/'external/preserved').write_text('external data stays\n')
     (data/'postgres/external-link').symlink_to(scenario/'external')
     for directory in [mount/'docker',mount/'containerd',scenario/'.local']:
@@ -149,7 +164,7 @@ for case in cases:
         labels={'com.docker.compose.project':project,'com.docker.compose.service':service,
                 'com.docker.compose.project.working_dir':str(deployment),'com.docker.compose.project.config_files':str(deployment/'docker-compose.yml'),
                 'com.docker.compose.oneoff':'False'}
-        containers.append({'Id':cid,'Image':'fixture-image','Config':{'Labels':labels},'Mounts':[{'Type':'bind','Source':source,'Destination':target} for source,target in sources.items()],
+        containers.append({'Id':cid,'Image':'sha256:'+'f'*64,'Config':{'Labels':labels},'Mounts':[{'Type':'bind','Source':source,'Destination':target} for source,target in sources.items()],
                            'State':{'Running':True,'ExitCode':0}})
     foreign={'Id':'d'*64,'Config':{'Labels':{}},'Mounts':[],'State':{'Running':True,'ExitCode':0}}
     containers.append(foreign)
@@ -188,17 +203,21 @@ for case in cases:
         containers[0]['Mounts'].append({'Type':'volume','Name':name,'Source':'/unrelated-docker-storage/anonymous','Destination':'/var/lib/postgresql'})
         state['volumes'][name]={'Driver':'local','Options':None}
     if case=='partial_missing': shutil.rmtree(deployment)
-    if case=='empty':
+    if case in ['empty','keep_empty']:
         shutil.rmtree(deployment); shutil.rmtree(data)
         shutil.rmtree(system); system.mkdir()
         state['containers']=[foreign]; state['active']={}; state['rules']={'iptables':['-A OTHER -j ACCEPT'],'ip6tables':[]}
     (scenario/'state.json').write_text(json.dumps(state))
+    if case.startswith('core0'):
+        (scenario/'installed-state.json').write_text(json.dumps(state))
+        shutil.copytree(system,scenario/'installed-system')
     script=(root/'scripts/cleanup-node.sh').read_text()
     assert script.count('SYSTEM_ROOT=/etc')==1 and script.count('LOCK_ROOT=/run/lock')==1
     script=script.replace('SYSTEM_ROOT=/etc','SYSTEM_ROOT='+str(system)).replace('LOCK_ROOT=/run/lock','LOCK_ROOT='+str(scenario/'locks'))
     (scenario/'cleanup.sh').write_text(script)
     argv=['--deployment-root',str(deployment),'--data-root',str(data),'--data-mount',str(mount),'--cluster-name','cleanup-test',
-          '--node-name',node,'--node-ip',node_ip,'--compose-project',project,'--core','--watchdog-device',str(watchdog)]
+          '--node-name',node,'--node-ip',node_ip,'--compose-project',project,'--core','--watchdog-device',str(watchdog),
+          '--cleanup-id','a'*64]
     (scenario/'argv.json').write_text(json.dumps(argv))
 (work/'cases').write_text('\n'.join(cases)+'\n')
 PY
@@ -220,6 +239,92 @@ for case in bad_marker linked_root nested_mount foreign_bind foreign_alias forei
   grep -q 'audit refused' "$WORK/$case/result.log"
   [[ ! -e "$WORK/$case/actions" ]]
   printf 'PASS: cleanup rejects %s before mutation\n' "$case"
+done
+for case in bad_marker partial_missing foreign_bind wrong_watchdog; do
+  if run_case "$case" audit --cleanup-level keep-data >"$WORK/$case/keep-refused.log" 2>&1; then
+    echo "Unsafe keep-data audit accepted: $case" >&2
+    exit 1
+  fi
+  grep -q 'audit refused' "$WORK/$case/keep-refused.log"
+  [[ ! -e "$WORK/$case/actions" ]]
+done
+if run_case keep_data audit --cleanup-level unknown >"$WORK/keep_data/invalid-level.log" 2>&1; then
+  echo 'Invalid cleanup level was accepted' >&2
+  exit 1
+fi
+[[ ! -e "$WORK/keep_data/actions" ]]
+printf 'PASS: keep-data retains ownership mount container and watchdog audit protections\n'
+
+for case in keep_data keep_empty; do
+  run_case "$case" audit --cleanup-level keep-data >"$WORK/$case/preview.json"
+  python3 - "$WORK/$case" <<'PY'
+import hashlib,json,pathlib,stat,sys
+root=pathlib.Path(sys.argv[1])
+def snapshot():
+    result={}
+    for name in ['deployment','ssd/cluster']:
+        base=root/name
+        if not base.exists(): continue
+        for path in [base,*base.rglob('*')]:
+            if path.name=='.one-postgres-ha-retained.json': continue
+            info=path.lstat()
+            content=str(path.readlink()) if path.is_symlink() else hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+            result[str(path.relative_to(root))]=[stat.S_IFMT(info.st_mode),stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid,content]
+    return result
+report=json.loads((root/'preview.json').read_text())
+assert report['cleanup_level']=='keep-data' and report['delete_paths']==[]
+assert report['data_preserved']==(root.name=='keep_data')
+assert report['deployment_preserved']==(root.name=='keep_data')
+assert report['retained_paths']==([str(root/'deployment'),str(root/'ssd/cluster')] if root.name=='keep_data' else [])
+(root/'before.json').write_text(json.dumps(snapshot(),sort_keys=True))
+PY
+  [[ ! -e "$WORK/$case/actions" ]]
+  if run_case "$case" remove --cleanup-level keep-data >"$WORK/$case/missing-apply.log" 2>&1; then
+    echo 'Keep-data removal ran without explicit --apply' >&2
+    exit 1
+  fi
+  [[ ! -e "$WORK/$case/actions" ]]
+  for phase in stop-ingress stop-postgres stop-etcd remove; do
+    run_case "$case" "$phase" --apply --cleanup-level keep-data >/dev/null
+  done
+  run_case "$case" audit --cleanup-level keep-data >/dev/null
+  for phase in stop-ingress stop-postgres stop-etcd remove; do
+    run_case "$case" "$phase" --apply --cleanup-level keep-data >/dev/null
+  done
+  python3 - "$WORK/$case" <<'PY'
+import hashlib,json,pathlib,stat,sys
+root=pathlib.Path(sys.argv[1])
+after={}
+for name in ['deployment','ssd/cluster']:
+    base=root/name
+    if not base.exists(): continue
+    for path in [base,*base.rglob('*')]:
+        if path.name=='.one-postgres-ha-retained.json': continue
+        info=path.lstat()
+        content=str(path.readlink()) if path.is_symlink() else hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+        after[str(path.relative_to(root))]=[stat.S_IFMT(info.st_mode),stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid,content]
+assert after==json.loads((root/'before.json').read_text())
+if root.name=='keep_data':
+    receipt=root/'deployment/.one-postgres-ha-retained.json'
+    recorded=json.loads(receipt.read_text())
+    assert recorded['phase']=='stopped' and recorded['transaction']=='a'*64
+    assert recorded['system_identifier']=='1234567890123456789'
+    assert stat.S_IMODE(receipt.stat().st_mode)==0o600 and receipt.stat().st_uid==0
+state=json.loads((root/'state.json').read_text())
+assert len(state['containers'])==1 and state['containers'][0]['Id']=='d'*64
+assert state['containers'][0]['State']['Running']
+assert not (root/'etc/keepalived/keepalived.conf').exists()
+assert not (root/'etc/systemd/system/one-postgres-ha-firewall.service').exists()
+assert not (root/'etc/udev/rules.d/70-one-postgres-ha-watchdog.rules').exists()
+assert (root/'external/preserved').is_file()
+PY
+  run_case "$case" audit --cleanup-level purge-data >"$WORK/$case/purge-preview.json"
+  for phase in stop-ingress stop-postgres stop-etcd remove; do
+    run_case "$case" "$phase" --apply --cleanup-level purge-data >/dev/null
+  done
+  [[ ! -e "$WORK/$case/deployment" && ! -e "$WORK/$case/ssd/cluster" ]]
+  run_case "$case" audit >/dev/null
+  printf 'PASS: %s preserves exact data configuration and ownership across retries then permits guarded purge\n' "$case"
 done
 for case in good image_volume short_identity legacy empty; do
   run_case "$case" audit >"$WORK/$case/preview.json"
@@ -357,6 +462,40 @@ done
 grep -q 'delete_paths' "$WORK/preview.log"
 grep -q "$WORK/core01/deployment" "$WORK/preview.log"
 printf 'PASS: actual cluster preview shows deletion paths and changes no service or data\n'
+run_ansible keep-preview -i "$WORK/cluster-inventory.yml" "$WORK/cluster-cleanup.yml" -e ha_cleanup_level=keep-data
+grep -q 'keep-data' "$WORK/keep-preview.log"
+grep -q 'retained_paths' "$WORK/keep-preview.log"
+for node in core01 core02 core03; do [[ ! -e "$WORK/$node/actions" ]]; done
+run_ansible keep-apply -i "$WORK/cluster-inventory.yml" "$WORK/cluster-cleanup.yml" -e ha_cleanup_apply=true -e ha_cleanup_level=keep-data
+python3 - "$WORK" <<'PY'
+import json,pathlib,shutil,sys
+work=pathlib.Path(sys.argv[1])
+events=[json.loads(line) for line in (work/'events.jsonl').read_text().splitlines()]
+ingress=[event[0] for event in events if event[2] in ['stop haproxy','disable keepalived.service']]
+postgres=[event[0] for event in events if event[2]=='stop postgres']
+etcd=[event[0] for event in events if event[2]=='stop etcd']
+removals=[event[0] for event in events if event[2].startswith('rm ')]
+assert len(ingress)==6 and len(postgres)==3 and len(etcd)==3 and len(removals)==9
+assert max(ingress)<min(postgres) and max(postgres)<min(etcd) and max(etcd)<min(removals)
+for node in ['core01','core02','core03']:
+    fixture=work/node
+    assert (fixture/'deployment/.one-postgres-ha-cluster').read_text()=='cleanup-test\n'
+    assert (fixture/'deployment/secrets/fixture-password').read_text()=='fixture-only-password\n'
+    assert (fixture/'ssd/cluster/postgres/fixture-data').read_bytes()==b'postgres data preserved\x00\xff'
+    assert (fixture/'ssd/cluster/etcd/fixture-data').read_bytes()==b'etcd data preserved\x00\xff'
+    state=json.loads((fixture/'state.json').read_text())
+    assert len(state['containers'])==1 and state['containers'][0]['Id']=='d'*64
+    # Model same-configuration reinstallation: only runtime containers and host
+    # configuration return; all retained deployment files and database bytes stay.
+    shutil.copyfile(fixture/'installed-state.json',fixture/'state.json')
+    shutil.rmtree(fixture/'etc')
+    shutil.copytree(fixture/'installed-system',fixture/'etc')
+    (fixture/'actions').unlink()
+(work/'events.jsonl').unlink()
+PY
+printf 'PASS: actual keep-data Ansible retains data identity secrets and global stop barriers\n'
+run_ansible reinstall-audit -i "$WORK/cluster-inventory.yml" "$WORK/cluster-cleanup.yml"
+printf 'PASS: retained roots audit after same-configuration fixture reinstallation\n'
 run_ansible apply -i "$WORK/cluster-inventory.yml" "$WORK/cluster-cleanup.yml" -e ha_cleanup_apply=true
 python3 - "$WORK" <<'PY'
 import json,pathlib,sys

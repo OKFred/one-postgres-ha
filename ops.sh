@@ -12,7 +12,7 @@ Usage: bash ops.sh [--inventory FILE] COMMAND [ARGUMENTS]
   migrate-plan|migrate-apply [one_minihouse|nexus]
   add-node NODE [--plan]
   install [--plan|--apply]
-  cleanup [--plan|--apply [--confirm DELETE-ONE-POSTGRES-HA]]
+  uninstall [--plan|--apply] [--keep-data|--purge-data] [--confirm TOKEN]
   package
 
 Inventory defaults to .local/inventory.yml. Windows: run through WSL.
@@ -20,7 +20,8 @@ preflight/plan read the site; secrets prepares local credentials, never resets t
 configure interactively creates fresh private configuration; it never deploys services.
 deploy prepares hosts and starts the cluster; it does not migrate business databases.
 install runs secrets, plan, deploy, status and verify under one lock.
-cleanup previews by default; applying deletes this cluster's PostgreSQL/etcd data.
+Use install.sh/uninstall.sh for the shared interactive entrypoints.
+uninstall defaults to a keep-data preview.
 USAGE
 }
 if [[ "${1:-}" == --inventory ]]; then
@@ -35,9 +36,11 @@ READ_ONLY=false
 INSTALL_APPLY=true
 CLEANUP_APPLY=false
 CLEANUP_CONFIRM=''
+CLEANUP_LEVEL=purge-data
 CONFIRMATION=DELETE-ONE-POSTGRES-HA
 case "$COMMAND" in
   help|-h|--help) usage; exit 0 ;;
+  uninstall) exec bash "$ROOT/uninstall.sh" --inventory "$INVENTORY" "$@" ;;
   configure)
     if [[ ${1:-} == --help || ${1:-} == -h ]]; then
       [[ $# -eq 1 ]] || die 'Unexpected arguments'
@@ -62,20 +65,34 @@ case "$COMMAND" in
     esac
     ;;
   cleanup)
-    case "${1:---plan}" in
-      --plan) [[ $# -le 1 ]] || die '--plan accepts no confirmation'; READ_ONLY=true ;;
-      --apply)
-        CLEANUP_APPLY=true
-        if [[ $# -eq 3 && "$2" == --confirm ]]; then
-          [[ "$3" == "$CONFIRMATION" ]] || die 'Incorrect cleanup confirmation'
-          CLEANUP_CONFIRM=$3
-        else
-          [[ $# -eq 1 ]] || die 'cleanup --apply accepts only --confirm DELETE-ONE-POSTGRES-HA'
-          [[ -t 0 ]] || die 'Non-interactive cleanup requires --confirm DELETE-ONE-POSTGRES-HA'
-        fi
-        ;;
-      *) die 'cleanup accepts --plan or --apply [--confirm DELETE-ONE-POSTGRES-HA]' ;;
-    esac
+    # Internal backend for uninstall.sh; operators use the common root entry.
+    cleanup_mode='' cleanup_level_seen=false
+    while (($#)); do
+      case "$1" in
+        --plan|--apply)
+          [[ -z $cleanup_mode ]] || die 'Choose --plan or --apply once'; cleanup_mode=$1 ;;
+        --keep-data|--purge-data)
+          [[ $cleanup_level_seen == false ]] || die 'Choose --keep-data or --purge-data once'
+          cleanup_level_seen=true; CLEANUP_LEVEL=${1#--} ;;
+        --confirm)
+          [[ $# -ge 2 && -n $2 && -z $CLEANUP_CONFIRM ]] || die '--confirm requires one token'
+          CLEANUP_CONFIRM=$2; shift ;;
+        *) die 'cleanup accepts --plan|--apply, --keep-data|--purge-data and --confirm TOKEN' ;;
+      esac
+      shift
+    done
+    if [[ $CLEANUP_LEVEL == keep-data ]]; then CONFIRMATION=UNINSTALL-ONE-POSTGRES-HA; fi
+    if [[ ${cleanup_mode:---plan} == --apply ]]; then
+      CLEANUP_APPLY=true
+      if [[ -n $CLEANUP_CONFIRM ]]; then
+        [[ $CLEANUP_CONFIRM == "$CONFIRMATION" ]] || die 'Incorrect cleanup confirmation'
+      else
+        [[ -t 0 ]] || die "Non-interactive cleanup requires --confirm $CONFIRMATION"
+      fi
+    else
+      [[ -z $CLEANUP_CONFIRM ]] || die '--confirm requires --apply'
+      READ_ONLY=true
+    fi
     PLAYBOOK=ansible/cleanup.yml
     ;;
   add-node)
@@ -317,15 +334,20 @@ elif [[ "$COMMAND" == install ]]; then
     printf 'INSTALL_PLAN_COMPLETE: no credentials or remote services changed.\n'
   fi
 elif [[ "$COMMAND" == cleanup ]]; then
-  run_playbook "$PLAYBOOK" -e ha_cleanup_apply=false
+  run_playbook "$PLAYBOOK" -e ha_cleanup_apply=false -e "ha_cleanup_level=$CLEANUP_LEVEL"
   if [[ "$CLEANUP_APPLY" == true ]]; then
     if [[ -z "$CLEANUP_CONFIRM" ]]; then
-      printf 'All displayed PostgreSQL/etcd data will be permanently deleted.\nType %s to continue: ' "$CONFIRMATION" >&2
+      if [[ $CLEANUP_LEVEL == purge-data ]]; then
+        printf 'All displayed PostgreSQL/etcd data will be permanently deleted.\n' >&2
+      else
+        printf 'Remove this cluster runtime; retain PostgreSQL/etcd data and node configuration.\n' >&2
+      fi
+      printf 'Type %s to continue: ' "$CONFIRMATION" >&2
       IFS= read -r CLEANUP_CONFIRM || die 'Cleanup confirmation was not provided'
       [[ "$CLEANUP_CONFIRM" == "$CONFIRMATION" ]] || die 'Cleanup cancelled: confirmation did not match'
     fi
-    run_playbook "$PLAYBOOK" -e ha_cleanup_apply=true
-    printf 'CLEANUP_COMPLETE: cluster removed; controller configuration and credentials retained.\n'
+    run_playbook "$PLAYBOOK" -e ha_cleanup_apply=true -e "ha_cleanup_level=$CLEANUP_LEVEL"
+    printf 'CLEANUP_COMPLETE: level=%s; controller configuration and credentials retained.\n' "$CLEANUP_LEVEL"
   else
     printf 'CLEANUP_PLAN_COMPLETE: no services or data changed. Apply with --apply after reviewing the displayed scope.\n'
   fi

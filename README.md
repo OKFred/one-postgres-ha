@@ -54,6 +54,10 @@ bash ops.sh configure
 bash install.sh
 ```
 
+三个项目统一使用根目录 `install.sh`、`uninstall.sh`。`bash install.sh` 需要交互输入
+`INSTALL`；明确执行可用 `bash install.sh --apply`，兼容旧的 `--yes` 别名。
+`--apply` 不跳过配置、主机指纹或预检，`--plan`、`--apply`、`--yes` 不能混用或重复。
+
 向导集中询问三台节点 IP、VIP、SSH 身份和共用 SSD 挂载路径，
 只读检测主机、网卡、Keepalived 版本及控制端管理来源，生成私有配置。
 SSH 指纹须与各主机控制台核对，VIP 须自行预留；确认后才保存。
@@ -145,26 +149,38 @@ bash scripts/publish-images.sh YOUR_REGISTRY/YOUR_NAMESPACE --push   # AMD64、A
 包括后续加入的副本；不是只清理当前机器。
 
 ```bash
-bash cleanup.sh           # 展示各节点的删除范围，不停止服务
-bash cleanup.sh --apply   # 再展示范围，输入 DELETE-ONE-POSTGRES-HA 确认
-bash install.sh           # 新建空集群并验收
+# 保留数据卸载
+bash uninstall.sh --plan --keep-data
+bash uninstall.sh --apply --keep-data
+
+# 或：彻底清理本集群数据
+bash uninstall.sh --plan --purge-data
+bash uninstall.sh --apply --purge-data
+
+bash install.sh
 ```
 
-**清理会永久删除该集群的 PostgreSQL、etcd 数据及节点部署目录。**
+不传参数的 `bash uninstall.sh` 等同于 `--plan --keep-data`；执行必须显式选择档位。
+`--keep-data` 保留 PostgreSQL、etcd 数据及节点 Compose、配置、凭据和归属标记，供同配置重装。
+**`--purge-data` 永久删除该集群的 PostgreSQL、etcd 数据及节点部署目录。**
 脚本先核对所有节点的目录归属和容器，再依次停止 VIP/代理、所有 PostgreSQL 和 etcd，
-最后删除数据与本项目的宿主配置。任一节点审计失败时，整个清理停止。
+最后按档位清理运行资源与本项目的宿主配置。任一节点审计失败时，整个清理停止。
 
 控制端 `.local/`（inventory、SSH 凭据、证书和记录）、独立备份服务器、Docker/containerd
 存储、SSD 文件系统与挂载、其他项目均保留。清理不运行 `docker system prune`，不格式化磁盘，
-不删除镜像缓存。清理完成后保留原密码和 CA；重新安装生成新的空数据库及集群标识。
+不删除镜像缓存。保留数据卸载后通过安装入口恢复宿主配置和服务；彻底清理后重装才生成新的空数据库及集群标识。
 
 自动化场景可显式传入确认值：
 
 ```bash
-bash cleanup.sh --apply --confirm DELETE-ONE-POSTGRES-HA
+bash uninstall.sh --apply --keep-data --confirm UNINSTALL-ONE-POSTGRES-HA
+bash uninstall.sh --apply --purge-data --confirm DELETE-ONE-POSTGRES-HA
 ```
 
-两个脚本均支持 `--inventory FILE`，默认使用 `.local/inventory.yml`。
+交互执行时按提示输入对应确认值；不支持用 `--yes` 跳过卸载确认。
+安装、卸载入口均支持 `--inventory FILE`，默认使用本项目 `.local/inventory.yml`，不读取另两个项目的配置。
+旧的根目录 `cleanup.sh` 已移除，安装和卸载分别使用 `install.sh`、`uninstall.sh`。
+`ops.sh` 仍是这两个入口调用的调度实现，也提供配置、状态、验收和备份等维护命令。
 若系统或 SSD 挂载也被删除，先按“准备与启动”恢复宿主条件。
 若控制端 `.local/` 也被删除且各节点 PG/etcd 数据已清空，重新运行 `bash ops.sh configure`。
 旧 PG/etcd 数据仍在时必须恢复匹配的旧 CA/密码，不能靠重新生成凭据接管旧库。
@@ -172,6 +188,22 @@ bash cleanup.sh --apply --confirm DELETE-ONE-POSTGRES-HA
 详细范围和失败处理见 [清理与重装](docs/reinstall.md)。
 
 ## 日常操作
+
+可在控制端使用中文菜单：
+
+```bash
+bash menu.sh
+```
+
+菜单包含配置、安装预览／执行、状态、验收、节点维护、全实例备份、隔离恢复和两档卸载。
+安装仍需输入 `INSTALL`；卸载仍需原入口要求的确认令牌，菜单不代填。
+新增副本、切主、备份与恢复演练需额外输入 `APPLY`，操作失败后显示退出码并返回菜单。
+菜单可从其他工作目录启动，默认使用本项目 `.local/`；显式设置 `HA_INVENTORY` 时沿用既有行为。
+Windows 请在 WSL 中运行。
+
+节点菜单支持新增已登记的 PG 副本和受控切主。当前没有受控移除节点命令，
+菜单会说明这一限制，不会直接删除 inventory 节点或改动 etcd 成员。
+命令行入口仍可用于自动化：
 
     bash ops.sh backup
     bash ops.sh restore-test

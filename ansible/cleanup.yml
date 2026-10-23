@@ -15,11 +15,12 @@
           - groups.core_nodes | difference(groups.pg_nodes) | length == 0
           - groups.pg_nodes | difference(ansible_play_hosts_all) | length == 0
           - ha_cleanup_apply | default(false) | string | lower in ['true', 'false']
+          - ha_cleanup_level | default('purge-data') in ['keep-data', 'purge-data']
           - node_name == inventory_hostname
           - node_ip is defined
           - data_mount is defined
           - data_root is defined
-        fail_msg: Cleanup must audit every pg_nodes host and use an explicit boolean apply flag.
+        fail_msg: Cleanup must audit every pg_nodes host and use a valid cleanup level and boolean apply flag.
     - name: Create a temporary backend file outside all deleted directories
       ansible.builtin.tempfile:
         state: file
@@ -54,6 +55,8 @@
           - --watchdog-gid
           - "{{ watchdog_gid | default(ha_cleanup_defaults.watchdog_gid) | string }}"
           - "{{ '--core' if inventory_hostname in groups.core_nodes else '--replica' }}"
+          - --cleanup-level
+          - "{{ ha_cleanup_level | default('purge-data') }}"
     - name: Inspect ownership paths containers and service configuration without deleting
       ansible.builtin.command:
         argv: "{{ ['/bin/bash', ha_cleanup_backend.path, 'audit'] + ha_cleanup_arguments }}"
@@ -62,6 +65,39 @@
     - name: Show the per-node deletion preview
       ansible.builtin.debug:
         msg: "{{ ha_cleanup_audit.stdout | from_json }}"
+    - name: Collect retained-data transactions after every node audit passed
+      ansible.builtin.set_fact:
+        ha_cleanup_transactions: >-
+          {{ groups.pg_nodes | map('extract', hostvars, 'ha_cleanup_audit')
+          | map(attribute='stdout') | map('from_json') | map(attribute='retained_receipt')
+          | reject('equalto', none) | map(attribute='transaction') | unique | list }}
+      run_once: true
+      when:
+        - ha_cleanup_level | default('purge-data') == 'keep-data'
+        - ha_cleanup_apply | default(false) | bool
+    - name: Refuse mixed retained-data transactions before stopping any member
+      ansible.builtin.assert:
+        that: ha_cleanup_transactions | length <= 1
+        fail_msg: Retained-data transactions differ; preserve the nodes for independent review.
+      run_once: true
+      when:
+        - ha_cleanup_level | default('purge-data') == 'keep-data'
+        - ha_cleanup_apply | default(false) | bool
+    - name: Reuse one verified transaction or create this cluster-wide transaction
+      ansible.builtin.set_fact:
+        ha_cleanup_transaction: >-
+          {{ ha_cleanup_transactions[0] if ha_cleanup_transactions | length == 1
+          else lookup('ansible.builtin.password', '/dev/null', chars=['hexdigits'], length=64) | lower }}
+      run_once: true
+      when:
+        - ha_cleanup_level | default('purge-data') == 'keep-data'
+        - ha_cleanup_apply | default(false) | bool
+    - name: Pass the shared transaction only to the confirmed keep-data mutations
+      ansible.builtin.set_fact:
+        ha_cleanup_arguments: "{{ ha_cleanup_arguments + ['--cleanup-id', ha_cleanup_transaction] }}"
+      when:
+        - ha_cleanup_level | default('purge-data') == 'keep-data'
+        - ha_cleanup_apply | default(false) | bool
 
 - name: Stop all owned ingress services before databases
   hosts: pg_nodes
@@ -105,7 +141,7 @@
   become: true
   any_errors_fatal: true
   tasks:
-    - name: Delete the owned PG etcd deployment and dedicated service configuration
+    - name: Remove owned runtime configuration and delete data only at purge-data level
       ansible.builtin.command:
         argv: "{{ ['/bin/bash', ha_cleanup_backend.path, 'remove'] + ha_cleanup_arguments + ['--apply'] }}"
       when: ha_cleanup_apply | default(false) | bool

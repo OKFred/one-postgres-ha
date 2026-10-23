@@ -1,0 +1,9 @@
+- name: Advance this verified retained-data recovery receipt
+  ansible.builtin.command:
+    argv: >-
+      {{ ['python3', deployment_root + '/bin/retained-state.py', pg_ha_retained_operation]
+      + pg_ha_retained_arguments + (['--core'] if inventory_hostname in groups.core_nodes else [])
+      + ['--transaction', hostvars[groups.core_nodes[0]].pg_ha_retained_transaction,
+      '--system-identifier', hostvars[groups.core_nodes[0]].pg_ha_initialize_key.stdout | trim] }}
+  changed_when: true
+  when: hostvars[groups.core_nodes[0]].pg_ha_retained_restore_required
