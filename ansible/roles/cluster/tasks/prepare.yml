@@ -55,6 +55,15 @@
     group: root
     mode: '0644'
 
+- name: Install the guarded retained-data recovery helpers
+  ansible.builtin.copy:
+    src: "{{ project_root }}/scripts/{{ item }}"
+    dest: "{{ deployment_root }}/bin/{{ item }}"
+    owner: root
+    group: root
+    mode: '0700'
+  loop: [cleanup-node.sh, retained-state.py]
+
 - name: Install node environment
   ansible.builtin.template:
     src: node.env.j2

@@ -8,6 +8,10 @@ die() {
 }
 PHASE=audit
 APPLY=false
+# Preserve the legacy cleanup command's destructive behavior unless the new
+# uninstall entrypoint explicitly selects keep-data.
+CLEANUP_LEVEL=purge-data
+CLEANUP_ID=''
 CORE=false
 DEPLOYMENT=''
 DATA=''
@@ -26,12 +30,14 @@ if [[ ${1:-} != --* && $# -gt 0 ]]; then
 fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --deployment-root | --data-root | --data-mount | --cluster-name | --node-name | --node-ip | --compose-project | --watchdog-device | --watchdog-gid)
+    --deployment-root | --data-root | --data-mount | --cluster-name | --node-name | --node-ip | --compose-project | --watchdog-device | --watchdog-gid | --cleanup-level | --cleanup-id)
       [[ $# -ge 2 ]] || die 'An option value is missing'
       case "$1" in
         --deployment-root) DEPLOYMENT=$2 ;; --data-root) DATA=$2 ;; --data-mount) MOUNT=$2 ;;
         --cluster-name) CLUSTER=$2 ;; --node-name) NODE=$2 ;; --node-ip) NODE_IP=$2 ;; --compose-project) PROJECT=$2 ;;
         --watchdog-device) WATCHDOG=$2 ;; --watchdog-gid) WATCHDOG_GID=$2 ;;
+        --cleanup-level) CLEANUP_LEVEL=$2 ;;
+        --cleanup-id) CLEANUP_ID=$2 ;;
       esac
       shift 2
       ;;
@@ -48,13 +54,15 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --help)
-      printf 'Usage: cleanup-node.sh [audit|stop-ingress|stop-postgres|stop-etcd|remove] --deployment-root PATH --data-root PATH --data-mount PATH --cluster-name NAME --node-name NAME --node-ip IP --compose-project NAME [--watchdog-device PATH] [--watchdog-gid GID] [--core|--replica] [--apply]\n'
+      printf 'Usage: cleanup-node.sh [audit|stop-ingress|stop-postgres|stop-etcd|remove] --deployment-root PATH --data-root PATH --data-mount PATH --cluster-name NAME --node-name NAME --node-ip IP --compose-project NAME [--watchdog-device PATH] [--watchdog-gid GID] [--cleanup-level keep-data|purge-data] [--cleanup-id ID] [--core|--replica] [--apply]\n'
       exit 0
       ;;
     *) die 'Unknown option' ;;
   esac
 done
 case "$PHASE" in audit | stop-ingress | stop-postgres | stop-etcd | remove) ;; *) die 'Unknown phase' ;; esac
+case "$CLEANUP_LEVEL" in keep-data | purge-data) ;; *) die 'Unknown cleanup level' ;; esac
+[[ -z "$CLEANUP_ID" || "$CLEANUP_ID" =~ ^[0-9a-f]{64}$ ]] || die 'Invalid cleanup transaction'
 [[ "$PHASE" == audit || "$APPLY" == true ]] || die 'A mutation requires explicit --apply'
 [[ $(id -u) == 0 ]] || die 'Run this backend as root'
 for tool in python3 docker realpath findmnt systemctl iptables ip6tables flock rm rmdir stat udevadm; do
@@ -71,9 +79,9 @@ fi
 
 # Audit every phase again. No Compose file or arbitrary shell/config content is executed.
 AUDIT=$(
-  python3 - "$DEPLOYMENT" "$DATA" "$MOUNT" "$CLUSTER" "$NODE" "$NODE_IP" "$PROJECT" "$CORE" "$SYSTEM_ROOT" "$WATCHDOG" "$WATCHDOG_GID" "$PHASE" <<'PY'
+  python3 - "$DEPLOYMENT" "$DATA" "$MOUNT" "$CLUSTER" "$NODE" "$NODE_IP" "$PROJECT" "$CORE" "$SYSTEM_ROOT" "$WATCHDOG" "$WATCHDOG_GID" "$PHASE" "$CLEANUP_LEVEL" <<'PY'
 import ipaddress, json, os, pathlib, re, shlex, stat, subprocess, sys
-deployment, data, mount, cluster, node, node_ip, project, core, system, watchdog, watchdog_gid, phase = sys.argv[1:]
+deployment, data, mount, cluster, node, node_ip, project, core, system, watchdog, watchdog_gid, phase, cleanup_level = sys.argv[1:]
 core = core == 'true'
 def require(condition, message):
     if not condition: raise RuntimeError(message)
@@ -138,7 +146,7 @@ try:
     stored=owned_root(data)
     require(deployed == stored, 'Deployment and data ownership must both be present or both absent')
     if deployed:
-        permitted={'.one-postgres-ha-cluster','.env','docker-compose.yml','config','secrets','bin','images'}
+        permitted={'.one-postgres-ha-cluster','.one-postgres-ha-retained.json','.env','docker-compose.yml','config','secrets','bin','images'}
         require(all(entry.name in permitted for entry in pathlib.Path(deployment).iterdir()), 'Unknown deployment files require manual review')
         permitted={'.one-postgres-ha-cluster','.one-postgres-ha-join-pending','postgres','etcd'}
         require(all(entry.name in permitted for entry in pathlib.Path(data).iterdir()), 'Unknown data-root files require manual review')
@@ -170,6 +178,19 @@ try:
             config=pathlib.Path(deployment+'/config/etcd.yml').read_text()
             require(re.findall(r'^name: (.+)$',config,re.M)==[node] and re.findall(r'^initial-cluster-token: (.+)$',config,re.M)==[cluster],
                     'etcd member or cluster identity mismatch')
+    retained=None
+    receipt=pathlib.Path(deployment)/'.one-postgres-ha-retained.json'
+    if regular(receipt):
+        info=receipt.stat()
+        require(deployed and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600, 'Unsafe retained-data receipt')
+        retained=json.loads(receipt.read_text())
+        expected={'schema':1,'cluster':cluster,'node':node,'project':project,'deployment':deployment,'data':data}
+        require(isinstance(retained,dict) and all(retained.get(key) == value for key,value in expected.items())
+                and set(retained)==set(expected)|{'transaction','phase','system_identifier','image_id'}
+                and retained['phase'] in ['stopped','resuming','complete']
+                and re.fullmatch(r'[0-9a-f]{64}',retained['transaction'])
+                and re.fullmatch(r'[1-9][0-9]{0,19}',retained['system_identifier'])
+                and re.fullmatch(r'sha256:[0-9a-f]{64}',retained['image_id']), 'Retained-data receipt identity differs')
     ids=run(['docker','ps','--all','--quiet','--no-trunc']).stdout.split()
     require(all(re.fullmatch(r'[0-9a-f]{64}',cid) for cid in ids), 'Invalid Docker container identity')
     objects=json.loads(run(['docker','inspect',*ids]).stdout) if ids else []
@@ -215,7 +236,7 @@ try:
         require(not any(item['service']==service for item in containers), 'Duplicate project service containers')
         exit_code=obj['State'].get('ExitCode')
         require(isinstance(exit_code,int), 'Cannot verify container exit status')
-        containers.append({'id':obj['Id'],'service':service,'running':obj['State']['Running'],'exit_code':exit_code})
+        containers.append({'id':obj['Id'],'service':service,'running':obj['State']['Running'],'exit_code':exit_code,'image':obj['Image']})
     holders=[]
     pg_ids=[item['id'] for item in containers if item['service']=='postgres' and item['running']]
     for process in pathlib.Path('/proc').iterdir():
@@ -298,9 +319,14 @@ try:
     if udev_owned:
         expected='SUBSYSTEM=="watchdog", KERNEL=="watchdog*", GROUP="'+watchdog_gid+'", MODE="0660"\nSUBSYSTEM=="misc", KERNEL=="watchdog", GROUP="'+watchdog_gid+'", MODE="0660"\n'
         require(deployed and udev.read_text()==expected, 'Watchdog udev rule ownership differs')
+    keep_data=cleanup_level == 'keep-data'
     print(json.dumps({'node':node,'cluster':cluster,'deployment_present':deployed,'data_present':stored,
-                      'deployment_root':deployment,'data_root':data,'data_mount':mount,
-                      'delete_paths':[deployment,data],
+                      'deployment_root':deployment,'data_root':data,'data_mount':mount,'compose_project':project,
+                      'cleanup_level':cleanup_level,
+                      'delete_paths':[] if keep_data else [deployment,data],
+                      'retained_paths':[deployment,data] if keep_data and deployed else [],
+                      'deployment_preserved':keep_data and deployed,'data_preserved':keep_data and stored,
+                      'retained_receipt':retained,
                       'firewall_owned':firewall_owned,'keepalived_owned':keep_owned,'udev_owned':udev_owned,
                       'firewall_dependency_services':dependency_services,
                       'watchdog_holders':holders,'containers':containers}))
@@ -350,6 +376,54 @@ case "$PHASE" in
     if [[ $(owned keepalived_owned) == true ]]; then
       ! systemctl is-active --quiet keepalived.service || die 'Keepalived is still active'
     fi
+    if [[ "$CLEANUP_LEVEL" == keep-data && $(owned deployment_present) == true ]]; then
+      [[ "$CLEANUP_ID" =~ ^[0-9a-f]{64}$ ]] || die 'Keep-data removal requires the cluster-wide cleanup transaction'
+      # All nodes passed graceful PG/DCS shutdown barriers before this phase.
+      # Read the identity through the existing immutable image without starting
+      # PostgreSQL, opening the watchdog, or granting write access to PGDATA.
+      python3 - "$AUDIT" "$CLEANUP_ID" <<'PY'
+import json,os,pathlib,re,stat,subprocess,sys,tempfile
+audit=json.loads(sys.argv[1]); transaction=sys.argv[2]
+data=pathlib.Path(audit['data_root'])/'postgres'
+version=data/'PG_VERSION'
+if not version.exists(): raise SystemExit(0)
+previous=audit['retained_receipt']
+if previous is not None and previous['transaction'] != transaction:
+    raise SystemExit('cleanup-node: retained-data transaction differs; preserve and review')
+images=[entry['image'] for entry in audit['containers'] if entry['service']=='postgres']
+image=images[0] if images else previous['image_id'] if previous else ''
+if not re.fullmatch(r'sha256:[0-9a-f]{64}',image): raise SystemExit('cleanup-node: no verified PostgreSQL image remains')
+control=data/'global/pg_control'
+info=control.lstat()
+if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != 999 or info.st_mode & 0o022:
+    raise SystemExit('cleanup-node: unsafe PostgreSQL control file')
+result=subprocess.run(['docker','run','--rm','--network','none','--read-only','--cap-drop','ALL',
+    '--security-opt','no-new-privileges','--user','999:999','--env','LC_ALL=C',
+    '--mount','type=bind,src='+str(data)+',dst=/var/lib/postgresql/data,readonly',
+    '--entrypoint','/usr/lib/postgresql/18/bin/pg_controldata',image,'/var/lib/postgresql/data'],
+    capture_output=True,text=True,timeout=60)
+identities=re.findall(r'^Database system identifier:\s+([1-9][0-9]{0,19})\s*$',result.stdout,re.M)
+states=re.findall(r'^Database cluster state:\s+(.+?)\s*$',result.stdout,re.M)
+if result.returncode != 0 or len(identities) != 1 or len(states) != 1 or states[0] not in ['shut down','shut down in recovery']:
+    raise SystemExit('cleanup-node: PostgreSQL control identity inspection failed')
+if previous is not None and previous['system_identifier'] != identities[0]:
+    raise SystemExit('cleanup-node: PostgreSQL identity differs from its retained receipt')
+receipt={key:audit[key] for key in ['cluster','node']}
+receipt.update(schema=1,project=audit['compose_project'],deployment=audit['deployment_root'],data=audit['data_root'],transaction=transaction,
+               phase='stopped',system_identifier=identities[0],image_id=image)
+directory=pathlib.Path(audit['deployment_root'])
+descriptor,temporary=tempfile.mkstemp(prefix='.retained-',dir=directory)
+try:
+    with os.fdopen(descriptor,'w') as output:
+        json.dump(receipt,output,sort_keys=True); output.write('\n'); output.flush(); os.fsync(output.fileno())
+    os.replace(temporary,directory/'.one-postgres-ha-retained.json')
+    directory_descriptor=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
+    try: os.fsync(directory_descriptor)
+    finally: os.close(directory_descriptor)
+finally:
+    if os.path.exists(temporary): os.unlink(temporary)
+PY
+    fi
     for line in "${CONTAINERS[@]}"; do
       [[ -n "$line" ]] || continue
       read -r cid service running <<<"$line"
@@ -383,7 +457,7 @@ case "$PHASE" in
       rm -- "$SYSTEM_ROOT/udev/rules.d/70-one-postgres-ha-watchdog.rules"
       udevadm control --reload
     fi
-    if [[ $(owned deployment_present) == true ]]; then
+    if [[ $(owned deployment_present) == true && "$CLEANUP_LEVEL" == purge-data ]]; then
       # Audit proved ownership, canonical roots, an SSD mount and no nested mounts.
       # rm does not follow internal symlinks; --one-file-system adds a second boundary.
       rm -rf --one-file-system -- "$DATA/postgres" "$DATA/etcd"
@@ -394,4 +468,4 @@ case "$PHASE" in
     systemctl daemon-reload
     ;;
 esac
-printf '{"node":"%s","phase":"%s","status":"complete"}\n' "$NODE" "$PHASE"
+printf '{"node":"%s","phase":"%s","cleanup_level":"%s","status":"complete"}\n' "$NODE" "$PHASE" "$CLEANUP_LEVEL"

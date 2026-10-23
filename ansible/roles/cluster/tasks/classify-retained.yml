@@ -1,0 +1,25 @@
+- name: Collect every inventoried PostgreSQL member's recovery state
+  ansible.builtin.set_fact:
+    pg_ha_retained_members: "{{ groups.pg_nodes | map('extract', hostvars, 'pg_ha_retained_state') | list }}"
+
+- name: Distinguish controlled incomplete recovery from ordinary cluster maintenance
+  ansible.builtin.set_fact:
+    pg_ha_retained_restore_required: >-
+      {{ pg_ha_retained_members | selectattr('present', 'equalto', true)
+      | rejectattr('phase', 'equalto', 'complete') | list | length > 0 }}
+
+- name: Require all members and the established DCS identity before any recovery start
+  ansible.builtin.assert:
+    that:
+      - not pg_ha_new_cluster
+      - pg_ha_initialize_key.stdout | trim is match('^[1-9][0-9]{0,19}$')
+      - pg_ha_retained_members | selectattr('present', 'equalto', true) | list | length == groups.pg_nodes | length
+      - pg_ha_retained_members | map(attribute='transaction') | unique | list | length == 1
+      - pg_ha_retained_members | map(attribute='system_identifier') | unique | list == [pg_ha_initialize_key.stdout | trim]
+    fail_msg: Controlled recovery requires every inventoried member with matching receipt transaction and existing DCS identity.
+  when: pg_ha_retained_restore_required
+
+- name: Remember the verified recovery transaction
+  ansible.builtin.set_fact:
+    pg_ha_retained_transaction: "{{ pg_ha_retained_members[0].transaction }}"
+  when: pg_ha_retained_restore_required

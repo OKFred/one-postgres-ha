@@ -69,6 +69,92 @@
     cluster_action: inspect-dcs
   roles: [cluster]
 
+- name: Inspect retained-data receipts on every PostgreSQL member
+  hosts: pg_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: inspect-retained
+  roles: [cluster]
+
+- name: Validate the complete controlled recovery before starting any member
+  hosts: core_nodes[0]
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: classify-retained
+  roles: [cluster]
+
+- name: Record recoverable startup intent on all retained members
+  hosts: pg_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: advance-retained
+    pg_ha_retained_operation: mark
+  roles: [cluster]
+
+- name: Start all validated retained PostgreSQL members without altering DCS
+  hosts: pg_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Start this controlled existing-data recovery member
+      ansible.builtin.command:
+        argv: [docker, compose, --env-file, .env, up, -d, --no-build, postgres]
+        chdir: "{{ deployment_root }}"
+      changed_when: true
+      when: hostvars[groups.core_nodes[0]].pg_ha_retained_restore_required
+
+- name: Require a unique leader after retained PostgreSQL recovery
+  hosts: core_nodes[0]
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Wait for the first core API and exactly one established leader
+      ansible.builtin.uri:
+        url: "http://{{ node_ip }}:{{ patroni_port }}/cluster"
+        return_content: true
+        status_code: 200
+      register: pg_ha_restored_cluster
+      until: >-
+        pg_ha_restored_cluster.status | default(0) == 200 and
+        (pg_ha_restored_cluster.json | default({})).members | default([])
+        | selectattr('role', 'equalto', 'leader') | list | length == 1
+      retries: 120
+      delay: 2
+      when: pg_ha_retained_restore_required
+
+- name: Confirm restored member health before existing rolling checks
+  hosts: pg_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Wait for this restored PostgreSQL process to become healthy
+      ansible.builtin.uri:
+        url: "http://{{ node_ip }}:{{ patroni_port }}/health"
+        status_code: 200
+      register: pg_ha_restored_member
+      until: pg_ha_restored_member.status | default(0) == 200
+      retries: 120
+      delay: 2
+      when: hostvars[groups.core_nodes[0]].pg_ha_retained_restore_required
+    - name: Remember the rendered configuration was consumed by recovered containers
+      ansible.builtin.set_fact:
+        pg_ha_patroni_template: "{{ pg_ha_patroni_template | combine({'changed': false}) }}"
+      when: hostvars[groups.core_nodes[0]].pg_ha_retained_restore_required
+    - name: Refresh image and configuration identity after controlled recovery
+      ansible.builtin.include_role:
+        name: cluster
+        tasks_from: inspect-update
+      when: hostvars[groups.core_nodes[0]].pg_ha_retained_restore_required
+
 - name: Bootstrap exactly one PostgreSQL primary
   hosts: core_nodes[0]
   gather_facts: false
@@ -138,5 +224,14 @@
 
 - name: Check the running cluster invariants
   ansible.builtin.import_playbook: verify.yml
+- name: Complete controlled recovery receipts only after full verification
+  hosts: pg_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: advance-retained
+    pg_ha_retained_operation: complete
+  roles: [cluster]
 - name: Install scheduled backup and restore tests
   ansible.builtin.import_playbook: data/install-timers.yml

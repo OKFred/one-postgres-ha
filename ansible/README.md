@@ -74,11 +74,12 @@ ip -j -4 route get 192.0.2.12
 | `verify.yml` | 只读核对PG18、checksum、唯一主库、system identifier、同步复制、etcd及代理 |
 | `add-node.yml` | 由`add_node`指定一个新备库，`add_node_plan=true`仅预览 |
 | `switchover.yml` | 切换到当前健康同步备库；可用`ops_target`指定当前同步备库 |
-| `cleanup.yml` | 默认审计整个 inventory 的 `pg_nodes`；显式确认后分阶段停止并删除本项目数据 |
+| `cleanup.yml` | 审计整个 inventory 的 `pg_nodes`；确认后分阶段停止，按数据档位清理本项目资源 |
 
 根目录 `install.sh` 串联凭据准备、计划、部署、状态和验收，共用控制端锁。
-`cleanup.sh` 默认预览，`--apply` 要求输入 `DELETE-ONE-POSTGRES-HA`。
-清理会永久删除 PG/etcd 数据，保留控制端私有配置、SSD 挂载和 Docker 存储。
+`uninstall.sh` 默认仅预览并保留数据；`--apply` 必须明确选择 `--keep-data` 或 `--purge-data`。
+保留数据卸载输入 `UNINSTALL-ONE-POSTGRES-HA`；彻底清理输入 `DELETE-ONE-POSTGRES-HA`。
+仅后者永久删除 PG/etcd 数据；两档均保留控制端私有配置、SSD 挂载和 Docker 存储。
 具体范围与限制见 [清理与重装](../docs/reinstall.md)。
 
 首次部署先启动三个etcd再等待仲裁，随后仅一个PGbootstrap，再建立两个副本。严格同步模式下，第一主库的角色就绪不能被当作写入验收；必须等同步副本可用。
