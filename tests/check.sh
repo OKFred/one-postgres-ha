@@ -25,6 +25,7 @@ cp -R ansible config images .ansible-lint .yamllint.yml "$lint_root/"
 bash tests/test-cli.sh
 bash tests/test-configure.sh
 python3 -B tests/test-configure-probe.py
+bash tests/test-architecture-preflight.sh
 bash tests/test-controller-settings.sh
 bash tests/test-publish-images.sh
 bash tests/test-entrypoints.sh
@@ -42,10 +43,12 @@ bash tests/test-switchover-gate.sh
 bash tests/test-proxy-start.sh
 bash tests/test-host-mounts.sh
 bash tests/test-host-tools.sh
+bash tests/test-host-architecture.sh
 bash tests/test-native-probe.sh
 bash tests/test-local-replication.sh
 bash tests/test-backup-ownership.sh
 bash scripts/data/test-versions.sh
+bash scripts/data/test-acceptance.sh
 bash tests/test-firewall-gate.sh
 bash tests/test-source-scan.sh
 bash tests/test-public-export.sh

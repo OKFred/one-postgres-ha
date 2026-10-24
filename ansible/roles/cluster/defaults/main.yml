@@ -2,6 +2,7 @@ project_root: "{{ playbook_dir | dirname }}"
 private_dir: "{{ project_root }}/.local"
 deployment_root: /opt/one-postgres-ha
 deployment_environment: production
+# Retain ARM64 for older inventories. configure detects aarch64 or x86_64.
 expected_architecture: aarch64
 postgres_uid: 999
 postgres_gid: 999

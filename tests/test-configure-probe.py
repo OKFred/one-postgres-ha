@@ -35,6 +35,7 @@ class HostFixture:
         self.addresses = [{"ifname": "eth0", "addr_info": [
             {"family": "inet", "local": "192.0.2.11", "prefixlen": 24},
             {"family": "inet6", "local": "fe80::11", "prefixlen": 64}]}]
+        self.architecture = "aarch64"
         self.blocks = {"blockdevices": [disk("/dev/sda", "/dev/sda1")]}
         self.mounts = {"filesystems": [mount("/dev/sda1", "/mnt/ssd")]}
         self.connection = "192.0.2.5 49152 192.0.2.11 22"
@@ -121,7 +122,7 @@ class HostFixture:
             patches.enter_context(mock.patch.object(HELPER.os, "statvfs", create=True,
                                                     side_effect=self.statvfs))
             patches.enter_context(mock.patch.object(HELPER.os.path, "lexists", side_effect=self.lexists))
-            patches.enter_context(mock.patch.object(HELPER.platform, "machine", return_value="aarch64"))
+            patches.enter_context(mock.patch.object(HELPER.platform, "machine", return_value=self.architecture))
             patches.enter_context(mock.patch.object(HELPER.shutil, "which",
                                                     return_value="/usr/bin/ping" if self.ping_available else None))
             patches.enter_context(mock.patch.dict(HELPER.os.environ,
@@ -133,6 +134,13 @@ class HostFixture:
 
 
 class ProbeTests(unittest.TestCase):
+    def test_reports_each_host_architecture_without_using_controller_architecture(self):
+        for architecture in ("aarch64", "x86_64", "riscv64"):
+            with self.subTest(architecture=architecture):
+                host = HostFixture()
+                host.architecture = architecture
+                self.assertEqual(host.execute()["architecture"], architecture)
+
     def test_partition_on_ssd_reports_network_source_and_available_space(self):
         host = HostFixture()
         result = host.execute()

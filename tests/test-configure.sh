@@ -48,8 +48,12 @@ probe = dict(node_ip=host, architecture='aarch64', os_id='debian', os_like='',
 mode = os.environ.get('FIXTURE_PROBE_MODE', '')
 if mode == 'wrong-types':
     probe['mounts'] = [None]
-elif mode == 'wrong-architecture':
+elif mode == 'amd64':
     probe['architecture'] = 'x86_64'
+elif mode == 'mixed-architecture' and host == '192.0.2.13':
+    probe['architecture'] = 'x86_64'
+elif mode == 'unknown-architecture':
+    probe['architecture'] = 'riscv64'
 elif mode == 'occupied-vip':
     probe['vip_in_use'] = True
 elif mode == 'missing-watchdog':
@@ -190,11 +194,15 @@ write_inputs
 expect_failure
 
 # An incomplete or unsuitable inspection must never publish a deployable input.
-for mode in malformed wrong-types wrong-architecture occupied-vip missing-watchdog readonly-mount existing-data insufficient-space existing-deployment missing-compose inconsistent-version different-controller; do
+for mode in malformed wrong-types mixed-architecture unknown-architecture occupied-vip missing-watchdog readonly-mount existing-data insufficient-space existing-deployment missing-compose inconsistent-version different-controller; do
   new_case
   export FIXTURE_PROBE_MODE="$mode"
   write_inputs
   expect_failure
+  case "$mode" in
+    mixed-architecture) grep -Fq 'mixed ARM64 and AMD64 clusters are unsupported' "$CASE/output" ;;
+    unknown-architecture) grep -Fq 'Initial setup requires ARM64 (aarch64) or AMD64 (x86_64) nodes' "$CASE/output" ;;
+  esac
 done
 
 for rejection in unsafe-path reservation unsafe-client unsigned-image cancelled; do
@@ -233,6 +241,8 @@ assert variables['keepalived_package_version'] == '1:2.3.3-1'
 assert variables['admin_cidrs'] == ['192.0.2.5/32']
 assert variables['client_cidrs'] == ['192.0.2.0/24']
 assert variables['postgres_image_mode'] == 'source'
+assert variables['expected_architecture'] == 'aarch64'
+assert 'Architecture: aarch64' in output.read_text()
 assert variables['backup_target']['enabled'] is False
 assert "private_dir + '/secrets/ssh-password'" in variables['ansible_password']
 assert (private / 'secrets/ssh-password').read_text().rstrip('\n') == password
@@ -263,6 +273,26 @@ run_wizard || result=$?
 [[ $result == 2 && ! -s "$FIXTURE_CALLS" ]]
 find "$PROJECT/.local" -type f -exec sha256sum {} + | sort >"$CASE/after"
 cmp "$CASE/before" "$CASE/after"
+
+# A full AMD64 cluster is detected from the remote probes, including while the
+# controller and fixture remain unchanged. No architecture prompt is needed.
+new_case
+export FIXTURE_PROBE_MODE=amd64
+write_inputs
+run_wizard || {
+  cat "$CASE/output" >&2
+  exit 1
+}
+python3 - "$PROJECT" "$CASE/output" <<'PY'
+import pathlib, sys, yaml
+private = pathlib.Path(sys.argv[1]) / '.local'
+variables = yaml.safe_load((private / 'inventory.yml').read_text())['all']['vars']
+assert variables['expected_architecture'] == 'x86_64'
+assert variables['deployment_environment'] == 'production'
+assert 'Architecture: x86_64' in pathlib.Path(sys.argv[2]).read_text()
+assert (private / 'secrets/ssh-password').is_file()
+assert not list(private.glob('configure.*'))
+PY
 
 # Reject linked private state without altering the directory it points to.
 new_case
@@ -344,4 +374,4 @@ assert not list(root.glob('.local/tool.*')), 'Finished controller retained its l
 assert not (root / '.local/inventory.yml').exists(), 'Routing created an inventory without running the wizard'
 PY
 
-echo 'PASS: configure trust gating, input/probe validation, atomic output, secret handling, key authentication and no-overwrite'
+echo 'PASS: configure ARM64/AMD64 detection, mixed/unknown architecture rejection, trust gating, atomic output, secret handling and no-overwrite'

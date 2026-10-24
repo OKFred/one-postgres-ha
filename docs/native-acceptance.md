@@ -2,6 +2,11 @@
 
 在控制端项目根目录运行，仅用于尚无业务的空集群。每次只注入一个故障，恢复后 `bash ops.sh verify` 必须通过，才能开始下一项。本文是可复现的操作流程，不代表任何现场步骤已通过。
 
+适用于全 AMD64（Linux `x86_64`）或全 ARM64（`aarch64`）三节点集群。
+配置向导保存的 `expected_architecture` 必须与各节点实际架构一致，新增副本也使用同架构。
+Debian 13 两种架构使用相同的操作流程，但物理机的 watchdog、网卡和 VRRP 条件仍须逐项验收。
+CI、单台 VM、QEMU 和未验证硬件 watchdog 的虚拟集群结果均不能作为完整原生 HA 故障通过证明。
+
 `tests/native-probe.py` 是验收时临时复制到宿主机的 Python 标准库助手，不参与常驻服务或 Bash/Ansible/Compose 部署入口。`snapshot`、`owner` 只读；写 proof、暂停/恢复进程及临时网络规则均要求 root、集群 ownership marker 和显式 `--apply`。硬件测试要求 Linux 支持 pidfd，不支持时拒绝发信号。
 
 ## 0. 工具与记录
@@ -44,6 +49,8 @@ tool ansible pg_nodes -m ansible.builtin.uri -a \
   'url=http://{{ node_ip }}:8008/cluster return_content=true' | tee "$EVIDENCE/cluster-before.txt"
 tool ansible core_nodes -m ansible.builtin.command -a \
   'ip -j -4 address show' | tee "$EVIDENCE/vip-before.txt"
+tool ansible pg_nodes -m ansible.builtin.command -a \
+  'uname -m' | tee "$EVIDENCE/architecture.txt"
 tool ansible-playbook tests/native-vip.yml | tee "$EVIDENCE/vip-query-before.txt"
 ```
 
@@ -151,3 +158,10 @@ tool ansible "$TARGET" -m ansible.builtin.command -a \
 再次经VIP读回本次所有 marker，保存 final verify、所有节点 boot_id、SSD及资源快照，核查对应时间段 OOM/重启日志。恢复所有本次停止服务，检查本次临时链已删除；90秒 timer只能恢复本次服务/规则，不能拿它当恢复已经完成的证明。
 
 最后只删除本次创建的 `public.<TABLE>`（以最初 RUNID 为准）；禁止通配删除、删 schema 或操作业务库。保留 `.local/evidence/native-<RUNID>/` 私有记录，分别标注代码检查、实际原生硬件结果、尚未完成的独立备份恢复与业务验收。任何一项失败就停止，不填造通过状态。
+
+业务迁移需要独立的故障验收 JSON，字段见 [数据迁移验收](../scripts/data/README.md)。
+仅在对应真实测试全部完成后填写 `native: true`、实际的 `architecture`（`x86_64` 或 `aarch64`）及各项通过状态；
+记录必须绑定当前 `cluster_name`、`system_identifier`、真实 UTC 完成时间和确认事务 LSN。
+迁移脚本只接受与 inventory `expected_architecture` 一致且 24 小时内完成的记录。
+旧 `arm64_native: true` 记录只兼容 ARM64 目标，不可复制到 AMD64 集群沿用。
+本文的 DCS 出口隔离步骤不能独自证明 JSON 中完整的 `network_isolation` 项，须另外完成相应故障场景。

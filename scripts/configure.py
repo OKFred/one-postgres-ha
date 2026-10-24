@@ -177,10 +177,10 @@ def collect(stage, vip, user, ips):
                 fail("Invalid probe mount structure")
         if entry.get("node_ip") != expected:
             fail("Probe address mismatch")
-        if entry.get("architecture") != "aarch64":
-            fail("Initial setup currently supports ARM64 nodes only")
+        if entry.get("architecture") not in ("aarch64", "x86_64"):
+            fail("Initial setup requires ARM64 (aarch64) or AMD64 (x86_64) nodes")
         if "debian" not in [entry.get("os_id"), *entry.get("os_like", "").split()] and entry.get("os_id") != "armbian":
-            fail("Initial setup requires Debian based Armbian nodes")
+            fail("Initial setup requires Debian based Linux nodes")
         if entry.get("docker_compose") is not True or entry.get("watchdog") is not True or entry.get("systemd_watchdog_usec") != 0:
             fail("Docker Compose or an unused hardware watchdog is unavailable")
         if entry.get("deployment_exists") is not False or entry.get("vip_in_use") is not False:
@@ -196,6 +196,8 @@ def collect(stage, vip, user, ips):
         if not re.fullmatch(r"[A-Za-z0-9.+:~_-]+", entry.get("keepalived_version", "")):
             fail("Invalid Keepalived package version")
         discoveries.append(entry)
+    if len({entry["architecture"] for entry in discoveries}) != 1:
+        fail("All three nodes must use the same architecture; mixed ARM64 and AMD64 clusters are unsupported")
     for field in ("prefix", "network", "controller_ip", "keepalived_version"):
         if len({entry[field] for entry in discoveries}) != 1:
             fail("Nodes disagree on " + field + "; configure manually")
@@ -213,6 +215,7 @@ def collect(stage, vip, user, ips):
         fail("No common writable local SSD mount with at least 20 GiB free and no cluster data")
     metadata = {"nodes": discoveries, "mounts": sorted(common), "vip": vip, "user": user}
     (stage / "metadata.json").write_text(json.dumps(metadata))
+    print("Detected node architecture:", discoveries[0]["architecture"], file=sys.stderr)
     print("Detected network:", discoveries[0]["network"], file=sys.stderr)
     print("Controller management address:", discoveries[0]["controller_ip"], file=sys.stderr)
     print("Keepalived package:", discoveries[0]["keepalived_version"], file=sys.stderr)
@@ -237,7 +240,7 @@ def render(stage, mount, cidr, postgres, tools, key_host):
     nodes = metadata["nodes"]
     variables = {"ansible_user": metadata["user"], "ansible_become": metadata["user"] != "root",
                  "cluster_name": "one-postgres-ha", "deployment_root": "/opt/one-postgres-ha",
-                 "deployment_environment": "production", "expected_architecture": "aarch64",
+                 "deployment_environment": "production", "expected_architecture": nodes[0]["architecture"],
                  "postgres_image_mode": "prebuilt" if postgres else "source", "postgres_ha_image": postgres,
                  "vip_address": metadata["vip"], "vip_prefix": nodes[0]["prefix"], "vip_router_id": 51,
                  "vip_reserved": True, "keepalived_package_version": nodes[0]["keepalived_version"],
@@ -316,6 +319,8 @@ def main():
             print(metadata["mounts"][0] if len(metadata["mounts"]) == 1 else "")
         elif args[1] == "network":
             print(metadata["nodes"][0]["network"])
+        elif args[1] == "architecture":
+            print(metadata["nodes"][0]["architecture"])
     elif command == "render":
         render(Path(args[0]), *args[1:])
     elif command == "publish":

@@ -384,20 +384,25 @@ restore_test() {
   isolated_restore "$directory" archive "$id"
 }
 validate_acceptance() {
-  local file id now at
+  local file id now at architecture
+  architecture=$(jq -er 'if has("expected_architecture") then .expected_architecture else "aarch64" end' "$config") ||
+    die 'missing or invalid target expected_architecture'
+  [[ $architecture = aarch64 || $architecture = x86_64 ]] || die 'unsupported target expected_architecture'
   file=$(jq -er --arg db "$database" '.migrations[$db].acceptance_file' "$config")
   [[ -f $file ]] || die 'missing native cluster failure acceptance JSON'
   id=$(control_id)
   now=$(date -u +%s)
-  jq -e --arg cluster "$cluster" --arg id "$id" --argjson now "$now" '
-    .cluster_name==$cluster and .system_identifier==$id and .arm64_native==true
+  jq -e --arg cluster "$cluster" --arg id "$id" --argjson now "$now" --arg architecture "$architecture" '
+    .cluster_name==$cluster and .system_identifier==$id
+    and ((.native==true and .architecture==$architecture)
+      or ($architecture=="aarch64" and (has("native") | not) and (has("architecture") | not) and .arm64_native==true))
     and .primary_failure==true and .proxy_failure==true and .etcd_failure==true
     and .network_isolation==true and .watchdog==true and .confirmed_transactions==true
     and (.completed_at | fromdateiso8601) <= $now
     and ($now-(.completed_at | fromdateiso8601)) <= 86400
     and (.replay_lsn | type=="string" and test("^[0-9A-F]+/[0-9A-F]+$"))
     and (.primary_lsn | type=="string" and test("^[0-9A-F]+/[0-9A-F]+$"))' "$file" >/dev/null ||
-    die 'cluster acceptance is incomplete, stale, or belongs to another cluster'
+    die 'cluster acceptance is incomplete, stale, or belongs to another cluster or architecture'
   at=$(jq -er '.primary_lsn' "$file")
   local replay
   replay=$(jq -er '.replay_lsn' "$file")

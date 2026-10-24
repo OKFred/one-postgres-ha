@@ -5,6 +5,8 @@ all:
     cluster_name: one-postgres-ha
     deployment_root: /opt/one-postgres-ha
     deployment_environment: production
+    # Use aarch64 for all ARM64 nodes or x86_64 for all AMD64 nodes.
+    # configure detects this value; mixed architectures are unsupported.
     expected_architecture: aarch64
     # source builds on each node; prebuilt pulls an immutable registry image.
     postgres_image_mode: source

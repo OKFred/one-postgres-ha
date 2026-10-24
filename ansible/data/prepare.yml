@@ -10,6 +10,7 @@
       - inventory_hostname not in groups.get('pg_nodes', [])
       - ansible_host not in (groups.get('pg_nodes', []) | map('extract', hostvars, 'ansible_host') | list)
       - deployment_root is match('^/[A-Za-z0-9_./-]+$')
+      - expected_architecture | default('aarch64') in ['aarch64', 'x86_64']
     fail_msg: Configure exactly one independent backup_server and enabled backup_target with a dedicated absolute path.
 
 - name: Check Docker on the independent backup host
@@ -80,6 +81,7 @@
   vars:
     data_config:
       cluster_name: "{{ cluster_name }}"
+      expected_architecture: "{{ expected_architecture | default('aarch64') }}"
       directory: "{{ backup_target.path }}"
       postgres_image: "{{ data_postgres_image }}"
       target:
