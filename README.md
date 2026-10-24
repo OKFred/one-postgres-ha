@@ -195,7 +195,8 @@ bash uninstall.sh --apply --purge-data --confirm DELETE-ONE-POSTGRES-HA
 
 ## 日常操作
 
-可在控制端使用中文菜单：
+可在控制端使用中英双语菜单，菜单项和提示按 `English -- 中文` 并排显示：
+主菜单和子菜单选择处直接回车退出整个菜单，子菜单输入 `0` 返回上一级。
 
 ```bash
 bash menu.sh
