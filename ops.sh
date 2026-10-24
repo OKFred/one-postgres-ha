@@ -146,7 +146,7 @@ if [[ -e "$CONTROLLER_ENV" || -L "$CONTROLLER_ENV" ]]; then
     esac
   done <"$CONTROLLER_ENV"
 fi
-TOOLS_IMAGE="${HA_TOOLS_IMAGE:-one-postgres-ha-tools:0.1.0}"
+TOOLS_IMAGE="${HA_TOOLS_IMAGE:-one-postgres-ha-tools:pg17.11}"
 if [[ "$COMMAND" == package ]]; then
   command -v git >/dev/null || die 'git is required'
   git -C "$ROOT" diff --quiet HEAD || die 'Commit tracked changes before packaging'

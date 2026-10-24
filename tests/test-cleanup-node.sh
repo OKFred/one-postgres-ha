@@ -29,7 +29,7 @@ elif name=='docker':
     if args==['info','--format','{{.DockerRootDir}}']: print('/unrelated-docker-storage')
     elif args[0]=='run':
         assert '--read-only' in args and '--network' in args and args[args.index('--network')+1]=='none'
-        assert args[args.index('--entrypoint')+1]=='/usr/lib/postgresql/18/bin/pg_controldata'
+        assert args[args.index('--entrypoint')+1]=='/usr/lib/postgresql/17/bin/pg_controldata'
         assert args[args.index('--mount')+1].endswith(',dst=/var/lib/postgresql/data,readonly')
         print('Database system identifier: 1234567890123456789')
         print('Database cluster state: shut down')
@@ -97,7 +97,7 @@ for name in ['docker','findmnt','systemctl','iptables','ip6tables','udevadm']: (
 cases=['good','bad_marker','linked_root','nested_mount','foreign_bind','foreign_alias','foreign_root','foreign_volume','extra_volume',
        'duplicate_bind','bad_permissions','bad_udev','wrong_watchdog','short_identity','forced_stop','image_volume','partial_missing','empty',
        'core01','core02','core03','legacy','bad_firewall_unit','bad_dependency','linked_dependency','linked_dependency_directory',
-       'keep_data','keep_empty']
+       'keep_data','keep_empty','wrong_major']
 for case in cases:
     scenario=work/case
     scenario.mkdir()
@@ -124,7 +124,7 @@ for case in cases:
     (deployment/'config/patroni.yml').write_text('scope: cleanup-test\nname: '+node+'\n')
     (deployment/'config/etcd.yml').write_text('name: '+node+'\ninitial-cluster-token: cleanup-test\n')
     pg_version=data/'postgres/PG_VERSION'
-    pg_version.write_text('18\n'); pg_version.chmod(0o600)
+    pg_version.write_text('17\n'); pg_version.chmod(0o600)
     subprocess.check_call(['chown','999:999',str(pg_version)])
     (data/'postgres/fixture-data').write_bytes(b'postgres data preserved\x00\xff')
     (data/'postgres/global').mkdir()
@@ -174,6 +174,7 @@ for case in cases:
            'mounts':[{'target':str(mount),'source':'/dev/fixture','fstype':'ext4','options':'rw'}],
            'rules':{'iptables':rules+['-A INPUT -p vrrp -j ONE_PG_HA'],'ip6tables':list(rules)}}
     if case=='bad_marker': (data/'.one-postgres-ha-cluster').write_text('different-cluster\n')
+    if case=='wrong_major': pg_version.write_text('18\n')
     if case=='linked_root': data.rename(mount/'original'); data.symlink_to(scenario/'external')
     if case=='nested_mount': state['mounts'].append({'target':str(data/'postgres/mount'),'source':'/dev/other','fstype':'ext4','options':'rw'})
     if case=='foreign_bind': foreign['Mounts']=[{'Type':'bind','Source':str(data),'Destination':'/foreign'}]
@@ -231,7 +232,7 @@ root=pathlib.Path(sys.argv[1])
 raise SystemExit(subprocess.call(['bash',str(root/'cleanup.sh'),sys.argv[2],*json.loads((root/'argv.json').read_text()),*sys.argv[3:]]))
 PY
 }
-for case in bad_marker linked_root nested_mount foreign_bind foreign_alias foreign_root foreign_volume extra_volume duplicate_bind bad_permissions bad_udev wrong_watchdog partial_missing bad_firewall_unit bad_dependency linked_dependency linked_dependency_directory; do
+for case in bad_marker linked_root nested_mount foreign_bind foreign_alias foreign_root foreign_volume extra_volume duplicate_bind bad_permissions bad_udev wrong_watchdog wrong_major partial_missing bad_firewall_unit bad_dependency linked_dependency linked_dependency_directory; do
   if run_case "$case" audit >"$WORK/$case/result.log" 2>&1; then
     echo "Unsafe cleanup audit accepted: $case" >&2
     exit 1
@@ -240,7 +241,7 @@ for case in bad_marker linked_root nested_mount foreign_bind foreign_alias forei
   [[ ! -e "$WORK/$case/actions" ]]
   printf 'PASS: cleanup rejects %s before mutation\n' "$case"
 done
-for case in bad_marker partial_missing foreign_bind wrong_watchdog; do
+for case in bad_marker partial_missing foreign_bind wrong_watchdog wrong_major; do
   if run_case "$case" audit --cleanup-level keep-data >"$WORK/$case/keep-refused.log" 2>&1; then
     echo "Unsafe keep-data audit accepted: $case" >&2
     exit 1

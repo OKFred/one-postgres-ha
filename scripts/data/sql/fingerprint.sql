@@ -22,8 +22,8 @@ FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('v', 'm') AND n.nspname NOT IN ('pg_catalog', 'information_schema') ORDER BY 1;
 SELECT 'constraint|' || json_build_array(n.nspname, c.relname, k.conname, pg_get_constraintdef(k.oid, false))::text
 FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_' AND k.contype <> 'n' ORDER BY 1;
--- PG18 represents NOT NULL in pg_constraint; PG17 uses pg_attribute only.
+WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_' ORDER BY 1;
+-- PostgreSQL17 stores NOT NULL in pg_attribute; include it in the column check.
 SELECT 'column|' || json_build_array(n.nspname,c.relname,a.attname,format_type(a.atttypid,a.atttypmod),
   a.attnotnull,a.attidentity,a.attgenerated,a.attacl,pg_get_expr(d.adbin,d.adrelid))::text
 FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace

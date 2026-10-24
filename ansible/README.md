@@ -71,7 +71,7 @@ ip -j -4 route get 192.0.2.12
 | `plan.yml` | preflight之后展示部署意图 |
 | `deploy.yml` | 准备配置、镜像、权限，按集群状态启动或逐节点更新 |
 | `status.yml` | 读取Patroni与Compose状态，不输出容器环境或凭据 |
-| `verify.yml` | 只读核对PG18、checksum、唯一主库、system identifier、同步复制、etcd及代理 |
+| `verify.yml` | 只读核对PG17、checksum、唯一主库、system identifier、同步复制、etcd及代理 |
 | `add-node.yml` | 由`add_node`指定一个新备库，`add_node_plan=true`仅预览 |
 | `switchover.yml` | 切换到当前健康同步备库；可用`ops_target`指定当前同步备库 |
 | `cleanup.yml` | 审计整个 inventory 的 `pg_nodes`；确认后分阶段停止，按数据档位清理本项目资源 |

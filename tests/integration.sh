@@ -203,6 +203,7 @@ postgresql:
   listen: 0.0.0.0:5433
   connect_address: $PREFIX-pg$number:5433
   data_dir: /var/lib/postgresql/data
+  bin_dir: /usr/lib/postgresql/17/bin
   pgpass: /run/patroni/pgpass
   authentication:
     superuser: {username: postgres}
@@ -242,6 +243,9 @@ start_pg() {
 for number in 1 2 3; do write_pg_config "$number" false; start_pg "$number"; done
 retry cluster_ready
 LEADER=$(primary)
+[[ $(sql "$LEADER" -c 'SHOW server_version_num;') =~ ^17[0-9]{4}$ ]]
+[[ $(sql "$LEADER" -c 'SHOW server_version;') == "$POSTGRES_VERSION"* ]]
+[[ $(docker exec "$LEADER" psql --version) == "psql (PostgreSQL) $POSTGRES_VERSION "* ]]
 [[ $(sql "$LEADER" -c 'SHOW data_checksums;') == on ]]
 [[ $(docker exec "$LEADER" id -u) == 999 ]]
 note 'one primary, two streaming replicas, strict synchronous commit, checksums and uid 999'

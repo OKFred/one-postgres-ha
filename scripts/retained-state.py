@@ -62,7 +62,7 @@ def main():
         "docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges", "--user", "999:999", "--env", "LC_ALL=C",
         "--mount", "type=bind,src=" + args.data_root + "/postgres,dst=/var/lib/postgresql/data,readonly",
-        "--entrypoint", "/usr/lib/postgresql/18/bin/pg_controldata", args.image, "/var/lib/postgresql/data",
+        "--entrypoint", "/usr/lib/postgresql/17/bin/pg_controldata", args.image, "/var/lib/postgresql/data",
     ])
     identities = re.findall(r"^Database system identifier:\s+([1-9][0-9]{0,19})\s*$", output, re.M)
     if identities != [receipt["system_identifier"]]:

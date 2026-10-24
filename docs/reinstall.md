@@ -164,9 +164,9 @@ bash install.sh --inventory /私有配置/site.yml
 `bash tests/test-retained-recovery.sh` 使用真实 Ansible 任务、隔离 HTTP 状态接口及模拟 Docker，
 覆盖受控恢复、部分完成重试、普通升级不触发恢复，以及缺失记录、事务或系统标识冲突的拒绝。
 它不等同于真实 Patroni／etcd 的三节点恢复验收。
-`bash tests/test-cleanup-containers.sh` 使用隔离 Docker 卷与内部网络，运行真实 PostgreSQL 18 和
+`bash tests/test-cleanup-containers.sh` 使用隔离 Docker 卷与内部网络，运行真实 PostgreSQL 17 和
 单成员 etcd，验证预览无业务变更、拒绝外部容器占用、只删除本项目数据及重建空数据库。
-该测试保留其他容器和 PG18 基础镜像继承的父目录匿名卷。
+该测试保留其他容器和外来卷，并单独覆盖旧布局父目录匿名卷的保护场景。
 
 容器测试模拟 SSD 元数据、Docker 存储边界、宿主 systemd、防火墙、udev 和未打开的 watchdog
 字符设备；准确排除代替宿主执行的测试控制容器。它不验证真实 watchdog、VIP 或 Patroni 故障切换。

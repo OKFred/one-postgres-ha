@@ -1,4 +1,26 @@
-# 已执行的验证
+# 版本验证记录
+
+## 当前 PG17 基线
+
+以下记录提交前的本地验证。对应提交的 AMD64／ARM64 原生构建与容器集成结果，
+以 [Check deployment 工作流](https://github.com/OKFred/one-postgres-ha/actions/workflows/check.yml) 为准。
+
+当前源码改为 PostgreSQL 17.11＋Patroni 4.1.5。下方 PG18 的历史通过记录不代表 PG17 已经完成
+镜像运行、ARM64 原生或现场故障验收；本轮新增验证及其边界在此单独记录。
+
+- 官方 `postgres:17.11-bookworm` OCI 索引已通过 Registry HTTPS 响应与本地 SHA256 计算核对，
+  包含 AMD64 和 ARM64。
+- 基线一致性、安装／卸载入口、PG17 配置及预构建镜像路由回归已通过；镜像命令由 mock 执行。
+- 全节点磁盘版本门槛、候选镜像实际探针脚本、清理及保留数据恢复测试已通过；
+  使用临时目录、真实 Ansible 和模拟 Docker，不代表真实集群验收。
+- Bash／ShellCheck、YAML、Ansible production lint 已通过。
+- 数据工具的 PG17 小版本差异、跨大版本拒绝、归档版本及无生产连接的恢复回归已通过；
+  备份归属、其余运维隔离回归和源码／公开导出脱敏检查也已通过。
+- WSL 直接执行 `tests/check.sh` 在 `test-local-replication.sh` 因缺少 `postgres` 系统账号停止，
+  不能记为完整检查通过。该原生 SQL 测试需要项目 PG17 工具镜像或准备好的 PostgreSQL 17 测试环境。
+- PG17 构建、集群运行与真实数据迁移测试应使用当前源码执行；现场和真实 Supabase 项目尚未验收。
+
+## 历史 PG18 验证
 
 记录日期：2026-10-06。源码检查与隔离实验在 Windows Docker Desktop 上执行。
 

@@ -1,6 +1,6 @@
 # one-postgres-ha
 
-三台专用 Linux ARM64 服务器上的 PostgreSQL 18 高可用部署工具。
+三台专用 Linux ARM64 服务器上的 PostgreSQL 17 高可用部署工具。
 使用 Bash 命令入口、Ansible 配置部署和 Docker Compose 容器。
 
 源码采用 [MIT](LICENSE)。第三方组件保留各自许可证，见 [THIRD_PARTY.md](THIRD_PARTY.md)。
@@ -22,7 +22,7 @@ etcd 使用双向 TLS；PostgreSQL 和 Patroni 管理 API 当前未启用 TLS，
 
 ## 服务
 
-- PostgreSQL 18.6＋Patroni 4.1.5，严格同步一个备库。
+- PostgreSQL 17.11＋Patroni 4.1.5，严格同步一个备库。
 - 三成员 etcd 3.6.15，客户端和成员通信使用双向 TLS。
 - HAProxy 根据 Patroni 的主库状态转发，Keepalived 在三台宿主机间迁移内网 VIP。
 - 数据各自存放在本地 SSD，备份写到独立服务器。
@@ -34,6 +34,11 @@ etcd 使用双向 TLS；PostgreSQL 和 Patroni 管理 API 当前未启用 TLS，
 新增节点默认只运行 PostgreSQL＋Patroni。
 
 ## 准备与启动
+
+当前版本以 PG17 为新安装基线，固定基础镜像 digest。已有 PG18 集群不能直接通过重装降为 PG17；
+须先保留旧版本源码及备份，单独安排新集群和逻辑迁移。当前卸载后端也拒绝 PG18 数据，
+需要清理旧 PG18 时使用对应的旧版源码。版本边界、工具镜像更新和 Supabase 迁移准备见
+[PG17 与数据迁移](docs/postgres17.md)。
 
 控制端需要 Bash、Docker、flock、Git。Windows 使用 WSL，并启用 Docker Desktop 对该发行版的集成。
 目标服务器需要 Docker Compose、Python 3、现有 SSD 挂载和可独占使用的 watchdog。
@@ -106,7 +111,8 @@ Keepalived 是宿主机服务，所以完整首次部署需要 ops.sh deploy。
 
 ## 使用预构建镜像
 
-可直接使用 [Docker Hub 预构建镜像](PREBUILT-IMAGES.md)，其中记录已发布镜像的固定摘要和配置向导填写方式。
+当前 PG17 镜像需要从本版本源码构建，或由使用者发布后填写固定摘要。
+[预构建镜像记录](PREBUILT-IMAGES.md) 中原有 PG18 摘要仅供旧版追溯，不能用于 PG17 安装。
 
 不需要 Docker Swarm。控制端仍通过 Ansible 在三台服务器上分别运行 Compose，
 按顺序建立 etcd 仲裁、主库和副本，并配置宿主机 Keepalived 与 watchdog。
@@ -230,8 +236,8 @@ migrate-apply 要求真实故障验收和恢复测试通过；缺少凭据、客
 oneMiniHouse 首批迁移，保留队列、角色、权限、RLS、Grafana UID 和查询。
 稳定运行至少 24 小时后才允许迁移 Nexus，其数据库和 blob 必须一致备份。
 
-PG18 接受业务写入前可以回退。切换到业务写入阶段之后，rollback 拒绝直接退回落后的旧库。
-此时应修复或恢复 PG18，保留旧库和迁移备份。
+目标 PG17 集群接受业务写入前可以回退。切换到业务写入阶段之后，rollback 拒绝直接退回落后的旧库。
+此时应修复或恢复目标集群，保留旧库和迁移备份。
 
 详细参数与步骤见 scripts/data/README.md 和 ansible/README.md。
 

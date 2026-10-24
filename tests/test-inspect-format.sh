@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 source "$ROOT/config/versions.env"
-TOOLS_IMAGE=${HA_TOOLS_IMAGE:-one-postgres-ha-tools:0.1.0}
+TOOLS_IMAGE=${HA_TOOLS_IMAGE:-one-postgres-ha-tools:pg17.11}
 docker() { MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' command docker "$@"; }
 host_path() { if command -v cygpath >/dev/null; then cygpath -m "$1"; else printf '%s\n' "$1"; fi; }
 mkdir -p "$ROOT/.local"

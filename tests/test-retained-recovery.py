@@ -27,7 +27,7 @@ if args[0]=='run':
     node=pathlib.Path(mount.split('src=',1)[1].split(',dst=',1)[0]).parent.parent.name
     state=json.loads((root/node/'state.json').read_text())
     assert '--read-only' in args and args[args.index('--network')+1]=='none'
-    assert args[args.index('--entrypoint')+1]=='/usr/lib/postgresql/18/bin/pg_controldata'
+    assert args[args.index('--entrypoint')+1]=='/usr/lib/postgresql/17/bin/pg_controldata'
     print('Database system identifier: '+state['system_identifier'])
     print('Database cluster state: '+state.get('control_state','shut down'))
 elif args[:2]==['image','inspect']:

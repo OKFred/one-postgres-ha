@@ -24,7 +24,7 @@ tool() {
     -e ANSIBLE_CONFIG=/workspace/ansible/ansible.cfg \
     -e ANSIBLE_LOCAL_TEMP=/tmp/ansible-local -e ANSIBLE_HOME=/tmp/ansible-home \
     -e 'ANSIBLE_SSH_ARGS=-o StrictHostKeyChecking=yes -o UserKnownHostsFile=/tmp/known_hosts' \
-    -w /workspace one-postgres-ha-tools:0.1.0 "$@" \
+    -w /workspace one-postgres-ha-tools:pg17.11 "$@" \
     -i /inventory.yml -e project_root=/workspace -e private_dir=/workspace/.local
 }
 ```

@@ -121,6 +121,34 @@ sql() {
   client "$endpoint" psql -X -qAt --set ON_ERROR_STOP=1 --dbname "$db" "$@"
 }
 control_id() { printf 'SELECT system_identifier FROM pg_control_system();\n' | sql target postgres; }
+client_version_checked=false
+require_pg17_client() {
+  "$client_version_checked" && return
+  local version
+  version=$(docker run --rm --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges --entrypoint pg_dump "$image" --version) ||
+    die 'could not inspect the pinned PostgreSQL client image'
+  [[ $version =~ ^pg_dump\ \(PostgreSQL\)\ 17\.[0-9]+([[:space:]]|$) ]] ||
+    die 'PostgreSQL17 clients are required; select a pinned PG17 client image and rebuild or replace stale tools/configuration'
+  client_version_checked=true
+}
+server_version() {
+  local version
+  version=$(printf 'SHOW server_version_num;\n' | sql "$1" postgres)
+  [[ $version =~ ^[1-9][0-9]{4,7}$ ]] || die 'invalid PostgreSQL server version response'
+  printf '%s\n' "$version"
+}
+require_pg17_server() {
+  local version
+  version=$(server_version "$1")
+  [[ $version =~ ^17[0-9]{4}$ ]] || die "$1 must run PostgreSQL17; other major versions and downgrades are unsupported"
+  printf '%s\n' "$version"
+}
+migration_version_checks() {
+  require_pg17_client
+  require_pg17_server source >/dev/null
+  require_pg17_server target >/dev/null
+}
 write_json() {
   local file=$1 temporary
   [[ ! -L $file ]] || die 'refusing to replace a symlink with operation state'
@@ -128,7 +156,7 @@ write_json() {
   cat >"$temporary"
   chmod 600 "$temporary"
   mv -fT -- "$temporary" "$file"
-  # syncfs includes the rename/directory metadata before any PG18 write is enabled.
+  # syncfs includes rename/directory metadata before target writes are enabled.
   sync -f "$file"
 }
 bind_backup_identity() {
@@ -228,6 +256,8 @@ backup() {
   done
   local id names db n=0 first_roles second_roles
   work="$root/state"
+  require_pg17_client
+  require_pg17_server target >/dev/null
   id=$(control_id)
   bind_backup_identity "$id"
   rm -f -- "$work/.pgpass-target"
@@ -277,11 +307,33 @@ start_restore() {
 }
 restore_sql() { docker exec -i "$restore_container" psql -X -qAt --username postgres --dbname "$1" --set ON_ERROR_STOP=1; }
 isolated_restore() {
-  local directory=$1 mode=${2:-archive} db file expected actual
+  local directory=$1 mode=${2:-archive} id=${3:-} db file expected actual header version
   [[ $directory = "$root/"* && -d $directory && ! -L $directory ]] || die 'invalid restore directory'
   work=$directory
   (cd "$work" && sha256sum --check --status SHA256SUMS) || die 'backup checksum failed'
+  require_pg17_client
+  # Backup rehearsals use their already verified directory identity and remain
+  # usable when production is offline. Migrations still bind to the live target.
+  [[ -n $id ]] || id=$(control_id)
+  [[ $id =~ ^[0-9]{1,20}$ ]] || die 'invalid restore source identity'
+  # Inspect every archive before creating a restore container or executing roles
+  # SQL. A PG18 archive must never be relabelled as a PG17 restore or downgrade.
+  for file in "$work"/*.dump; do
+    [[ -f $file ]] || die 'no dump archives found'
+    db=$(basename -- "$file" .dump)
+    safe_name "$db"
+    header="$work/$db.archive-header"
+    docker run --rm --network none --read-only --cap-drop ALL \
+      --security-opt no-new-privileges --volume "$work:/backup:ro" \
+      --entrypoint pg_restore "$image" --list "/backup/$db.dump" >"$header" 2>"$header.error" ||
+      die 'archive cannot be inspected by PostgreSQL17 pg_restore; preserve it and use its matching major version'
+    [[ $(grep -Ec '^;[[:space:]]+Dumped from database version: 17\.[0-9]{1,4}([[:space:]]|$)' "$header") == 1 &&
+      $(grep -Ec '^;[[:space:]]+Dumped by pg_dump version: 17\.[0-9]+([[:space:]]|$)' "$header") == 1 ]] ||
+      die 'archive must be exported from PostgreSQL17 by PostgreSQL17 pg_dump; PG18 archives and downgrades are unsupported'
+  done
   start_restore
+  version=$(printf 'SHOW server_version_num;\n' | restore_sql postgres)
+  [[ $version =~ ^17[0-9]{4}$ ]] || die 'isolated restore server must run PostgreSQL17'
   # The bootstrap role OID must match production for GRANTED BY semantics.
   # Keep ALTER ROLE postgres (password/settings), skip only its duplicate CREATE.
   if [[ -f $work/roles.sql ]]; then sed '/^CREATE ROLE postgres;$/d' "$work/roles.sql" | restore_sql postgres; fi
@@ -315,7 +367,7 @@ isolated_restore() {
       --set "required_roles=$role_csv" <"$here/sql/role-fingerprint.sql" >"$work/restored.roles.fingerprint"
     cmp -s "$work/source.roles.fingerprint" "$work/restored.roles.fingerprint" || die 'restored role password/settings/membership verification failed'
   fi
-  jq -n --arg cluster "$cluster" --arg id "$(control_id)" --arg at "$(date -u +%FT%TZ)" \
+  jq -n --arg cluster "$cluster" --arg id "$id" --arg at "$(date -u +%FT%TZ)" \
     --arg checksum "$(sha256sum "$work/SHA256SUMS" | cut -d' ' -f1)" --arg mode "$mode" \
     '{passed:true,cluster_name:$cluster,system_identifier:$id,completed_at:$at,checksum_manifest:$checksum,isolated:true,sequence_check:$mode}' |
     write_json "$work/restore-test.json"
@@ -323,10 +375,11 @@ isolated_restore() {
 }
 restore_test() {
   [[ -f $root/state/latest-backup && ! -L $root/state/latest-backup ]] || die 'run backup before restore-test; latest-backup must not be a symlink'
-  local directory
+  local directory id
   directory=$(cat "$root/state/latest-backup")
-  owned_backup "$directory" "$(jq -er '.system_identifier' "$owner_file")" || die 'latest backup does not belong to this directory owner'
-  isolated_restore "$directory"
+  id=$(jq -er '.system_identifier' "$owner_file")
+  owned_backup "$directory" "$id" || die 'latest backup does not belong to this directory owner'
+  isolated_restore "$directory" archive "$id"
 }
 validate_acceptance() {
   local file id now at
@@ -355,6 +408,7 @@ validate_acceptance() {
 migration_checks() {
   safe_name "$database"
   [[ $database = one_minihouse || $database = nexus ]] || die 'unsupported migration database'
+  migration_version_checks
   local source_db roles role super
   source_db=$(jq -er --arg db "$database" '.migrations[$db].source.database' "$config")
   [[ $source_db = "$database" ]] || die 'source database must preserve its name'
@@ -373,10 +427,6 @@ migration_checks() {
     sql source "$database" --set "roles=$roles")
   [[ $super = 0 ]] || die 'business roles have administrative capabilities; connection-limit freeze would be insufficient'
   reject_tablespaces source
-  [[ $(printf 'SHOW server_version_num;\n' | sql target postgres) =~ ^18[0-9]+$ ]] || die 'target must run PostgreSQL18'
-  if [[ $database = one_minihouse ]]; then
-    [[ $(printf 'SHOW server_version_num;\n' | sql source postgres) =~ ^17[0-9]+$ ]] || die 'one_minihouse source must run PostgreSQL17'
-  fi
   if [[ $database = nexus ]]; then
     local other_databases
     other_databases=$(printf "SELECT count(*) FROM pg_database WHERE NOT datistemplate AND datname NOT IN ('postgres','nexus');\n" | sql source postgres)
@@ -484,7 +534,8 @@ migrate_apply() {
 write_started() {
   [[ $(phase) = restored ]] || die 'endpoint switch requires restored state'
   load_work
-  # Set first: a crash after this point must never authorize stale-PG17 rollback.
+  migration_version_checks
+  # Set first: a crash after this point must never authorize stale-source rollback.
   set_phase write-started
   local limit
   limit=$(cat "$work/original-connection-limit")
@@ -523,11 +574,13 @@ rollback() {
   local current
   current=$(phase)
   case $current in
-    write-started | migrated) die 'PG18 may have accepted writes. Stale-source rollback is prohibited; repair HA or restore a PG18 backup.' ;;
+    write-started | migrated) die 'the target may have accepted writes. Stale-source rollback is prohibited; repair HA or restore its matching PostgreSQL17 backup.' ;;
     freezing | frozen | restored) ;;
     *) die 'there is no pre-write migration to roll back' ;;
   esac
   load_work
+  require_pg17_client
+  require_pg17_server source >/dev/null
   local limit
   limit=$(cat "$work/original-connection-limit")
   [[ $limit =~ ^-?[0-9]+$ ]] || die 'invalid original connection limit'

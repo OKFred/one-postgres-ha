@@ -11,7 +11,9 @@ set -Eeuo pipefail
 case $1 in
   ps) exit 0 ;;
   run)
+    if [[ ${!#} == --version ]]; then printf 'pg_dump (PostgreSQL) 17.11\n'; exit 0; fi
     query=$(cat)
+    if [[ $query == 'SHOW server_version_num;' ]]; then printf '170011\n'; exit 0; fi
     [[ $query = 'SELECT system_identifier FROM pg_control_system();' ]] || exit 97
     printf '%s\n' "${FIXTURE_CONTROL_ID:?}"
     ;;

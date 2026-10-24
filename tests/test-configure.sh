@@ -337,7 +337,7 @@ import pathlib, sys
 args = pathlib.Path(sys.argv[1]).read_bytes().decode().split('\0')[:-1]
 assert '--interactive' in args and '--tty' in args
 assert '--read-only' in args
-assert args[-3:] == ['one-postgres-ha-tools:0.1.0', 'bash', 'scripts/configure.sh']
+assert args[-3:] == ['one-postgres-ha-tools:pg17.11', 'bash', 'scripts/configure.sh']
 assert not any('dst=/inventory.yml' in arg for arg in args)
 root = pathlib.Path(sys.argv[2])
 assert not list(root.glob('.local/tool.*')), 'Finished controller retained its lifecycle directory'

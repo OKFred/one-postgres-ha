@@ -1,5 +1,5 @@
 ---
-- name: Restore source connection access only before PG18 may have accepted writes
+- name: Restore source connection access only before the target may have accepted writes
   ansible.builtin.command:
     argv: [/bin/bash, "{{ deployment_root }}/data/data.sh", rollback, "{{ ha_data_database }}"]
   changed_when: true

@@ -23,3 +23,70 @@
     chdir: "{{ deployment_root }}"
   changed_when: true
   when: postgres_image_mode == 'prebuilt'
+
+- name: Read the actual configured PostgreSQL image reference
+  ansible.builtin.command:
+    argv: [docker, compose, --env-file, .env, config, --format, json]
+    chdir: "{{ deployment_root }}"
+  register: pg_ha_image_contract_model
+  changed_when: false
+  no_log: true
+
+- name: Resolve the immutable local image ID for the runtime contract probe
+  ansible.builtin.command:
+    argv:
+      - docker
+      - image
+      - inspect
+      - --format
+      - '{{ "{{.Id}}" }}'
+      - "{{ (pg_ha_image_contract_model.stdout | from_json).services.postgres.image }}"
+  register: pg_ha_image_contract_id
+  changed_when: false
+
+- name: Require an immutable image ID before running the version probe
+  ansible.builtin.assert:
+    that: pg_ha_image_contract_id.stdout | trim is match('^sha256:[0-9a-f]{64}$')
+    fail_msg: Cannot verify the actual PostgreSQL image; no database service was started or stopped.
+
+- name: Verify actual PostgreSQL 17 binaries and project helpers without credentials or existing data
+  ansible.builtin.command:
+    argv:
+      - timeout
+      - --signal=TERM
+      - --kill-after=5
+      - '30'
+      - docker
+      - run
+      - --rm
+      - --init
+      - --pull=never
+      - --network
+      - none
+      - --read-only
+      - --cap-drop
+      - ALL
+      - --security-opt
+      - no-new-privileges
+      - --user
+      - '999:999'
+      - --memory
+      - 128m
+      - --cpus
+      - '0.5'
+      - --entrypoint
+      - /bin/sh
+      - "{{ pg_ha_image_contract_id.stdout | trim }}"
+      - -ec
+      - |
+        fail() { printf '%s\n' 'Expected a PostgreSQL 17 project image; no database service was started or stopped.' >&2; exit 2; }
+        for binary in /usr/lib/postgresql/17/bin/postgres /usr/lib/postgresql/17/bin/pg_controldata \
+          /usr/local/bin/patroni-entrypoint /usr/local/bin/patroni-healthcheck /usr/local/bin/pg-admin /opt/patroni/bin/patroni; do
+          [ -x "$binary" ] || fail
+        done
+        version=$(/usr/lib/postgresql/17/bin/postgres --version) || fail
+        case "$version" in
+          'postgres (PostgreSQL) 17.'[0-9]*) printf '%s\n' 'PostgreSQL 17 project image verified.' ;;
+          *) fail ;;
+        esac
+  changed_when: false
