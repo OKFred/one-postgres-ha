@@ -44,6 +44,18 @@ bash "$project/menu.sh" --help >"$work/output"
 if bash "$project/menu.sh" --apply >"$work/output" 2>&1; then exit 1; fi
 run_menu ''
 expect_calls ''
+# A blank menu selection exits immediately, leaving later input unused.
+run_menu $'\n03\n00\n'
+expect_calls ''
+for submenu in 2 4 5 6 7; do
+  run_menu "$submenu"$'\n\n0\n03\n00\n'
+  expect_calls ''
+done
+# Empty node names and APPLY confirmations still cancel only that operation.
+run_menu $'5\n2\n\n1\n0\n0\n'
+expect_calls $'ops.sh <status>\n'
+run_menu $'5\n4\n\n1\n0\n0\n'
+expect_calls $'ops.sh <status>\n'
 run_menu $'bogus\n00\n'
 expect_calls ''
 run_menu $'02\n'
