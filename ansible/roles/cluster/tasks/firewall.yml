@@ -78,7 +78,9 @@
   # Ansible starts the oneshot service when it has not yet run.
   ansible.builtin.systemd_service:
     name: one-postgres-ha-firewall
-    daemon_reload: "{{ pg_ha_firewall_unit.changed or pg_ha_firewall_dependencies.changed }}"
+    daemon_reload: >-
+      {{ pg_ha_firewall_unit.changed or pg_ha_firewall_dependencies.changed
+         or pg_ha_keepalived_package.changed | default(false) }}
     enabled: true
     state: "{{ 'reloaded' if pg_ha_firewall_script.changed or pg_ha_firewall_unit.changed else 'started' }}"
 

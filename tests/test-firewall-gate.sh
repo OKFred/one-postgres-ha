@@ -109,7 +109,44 @@ for task in tasks:
         argv = task['ansible.builtin.command']['argv']
         argv[2] = argv[2].replace("root = pathlib.Path('/etc/systemd/system')", 'root = pathlib.Path(sys.argv[5])')
         argv.append('{{ fixture_system }}/systemd/system')
-(role/'tasks/main.yml').write_text(yaml.safe_dump(tasks, sort_keys=False))
+(role/'tasks/firewall.yml').write_text(yaml.safe_dump(tasks, sort_keys=False))
+prepare = yaml.safe_load((root/'ansible/roles/cluster/tasks/prepare.yml').read_text())
+selected = []
+for task in prepare:
+    if task['name'] == 'Install the pinned Keepalived package':
+        task = copy.deepcopy(task)
+        package = task.pop('ansible.builtin.apt')
+        assert package['state'] == 'present' and package['update_cache'] is True
+        task['ansible.builtin.command'] = dict(argv=[str(tools/'install-keepalived'),
+            package['name'], str(package['policy_rc_d'])])
+        task['changed_when'] = "pg_ha_keepalived_package.stdout == 'installed'"
+        selected.append(task)
+    elif task['name'] == 'Install and apply the firewall startup gate':
+        selected.append(copy.deepcopy(task))
+assert len(selected) == 2
+(role/'tasks/prepare-core.yml').write_text(yaml.safe_dump(selected, sort_keys=False))
+(role/'tasks/main.yml').write_text(yaml.safe_dump([
+    dict(name='Exercise the actual preparation sequence for a core node',
+         **{'ansible.builtin.include_tasks': 'prepare-core.yml'},
+         when='fixture_prepare | default(false) and not fixture_firewall_only | default(false)'),
+    dict(name='Exercise the standalone firewall tasks',
+         **{'ansible.builtin.include_tasks': 'firewall.yml'},
+         when='not fixture_prepare | default(false) or fixture_firewall_only | default(false)')], sort_keys=False))
+installer = tools/'install-keepalived'
+installer.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ['HA_FIREWALL_FIXTURE'])
+statefile = root/'state.json'
+state = json.loads(statefile.read_text())
+assert sys.argv[1:] == ['keepalived=1:2.3.3-1', '101'], 'Package installation must suppress automatic startup'
+changed = not state['keepalived_installed']
+with (root/'calls').open('a') as calls:
+    calls.write('package keepalived policy_rc_d=101 changed='+str(changed).lower()+'\\n')
+state['keepalived_installed'] = True
+statefile.write_text(json.dumps(state))
+print('installed' if changed else 'present')
+''')
+installer.chmod(0o755)
 stub = tools/'systemctl'
 stub.write_text('''#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -120,7 +157,7 @@ args = sys.argv[1:]
 with (root/'calls').open('a') as calls:
     calls.write(' '.join(args)+'\\n')
 if args == ['daemon-reload']:
-    pass
+    state['keepalived_loaded'] = state['keepalived_installed']
 elif args[:1] == ['show'] and len(args) == 2:
     assert args[1] == 'one-postgres-ha-firewall'
     print('LoadState=loaded\\nActiveState='+('active' if state['active'] else 'inactive'))
@@ -141,14 +178,16 @@ elif args[:3] == ['show', '--property=Requires', '--property=After']:
     assert service in ['docker.service', 'keepalived.service']
     gate = root/'etc/systemd/system'/(service+'.d')/'30-one-postgres-ha-firewall.conf'
     assert gate.exists()
-    print('Requires='+('' if state.get('reset_dependencies') else 'one-postgres-ha-firewall.service'))
-    print('After=network-online.target one-postgres-ha-firewall.service')
+    loaded = service != 'keepalived.service' or state['keepalived_loaded']
+    print('Requires='+('one-postgres-ha-firewall.service' if loaded and not state.get('reset_dependencies') else ''))
+    print('After='+('network-online.target one-postgres-ha-firewall.service' if loaded else ''))
 else:
     raise SystemExit('Unexpected service command: '+' '.join(args))
 statefile.write_text(json.dumps(state))
 ''')
 stub.chmod(0o755)
-cases = ['core', 'replica', 'legacy', 'bad_unit', 'bad_gate', 'linked_gate', 'linked_directory', 'apply_failure', 'reset_dependencies']
+cases = ['core', 'replica', 'legacy', 'bad_unit', 'bad_gate', 'linked_gate', 'linked_directory',
+         'apply_failure', 'reset_dependencies', 'fresh_core', 'retry_core']
 core_hosts, replica_hosts = {}, {}
 dependency = (root/'ansible/roles/cluster/templates/firewall-dependency.conf.j2').read_text()
 for index, name in enumerate(cases):
@@ -173,9 +212,11 @@ for index, name in enumerate(cases):
         (scenario/'foreign').mkdir()
         (system/'systemd/system/keepalived.service.d').symlink_to(scenario/'foreign')
     (scenario/'state.json').write_text(json.dumps(dict(active=name == 'legacy', enabled=name == 'legacy',
-        fail_apply=name == 'apply_failure', reset_dependencies=name == 'reset_dependencies')))
+        fail_apply=name == 'apply_failure', reset_dependencies=name == 'reset_dependencies',
+        keepalived_installed=name != 'fresh_core', keepalived_loaded=name != 'fresh_core')))
     values = dict(ansible_connection='local', ansible_python_interpreter=sys.executable,
-        deployment_root=str(deployment), fixture_system=str(system), fixture_dir=str(scenario), node_ip='192.0.2.'+str(index+10))
+        deployment_root=str(deployment), fixture_system=str(system), fixture_dir=str(scenario), node_ip='192.0.2.'+str(index+10),
+        fixture_prepare=name in ['fresh_core', 'retry_core'], keepalived_package_version='1:2.3.3-1')
     (replica_hosts if name == 'replica' else core_hosts)[name] = values
 inventory = dict(all=dict(children=dict(core_nodes=dict(hosts=core_hosts),
     pg_nodes=dict(children=dict(core_nodes={}, replica_nodes=dict(hosts=replica_hosts))))))
@@ -187,7 +228,7 @@ play = dict(name='Exercise actual firewall startup gate tasks', hosts='all', gat
 PY
 
 run_case() {
-  ANSIBLE_CONFIG="$ROOT/ansible/ansible.cfg" ansible-playbook -i "$WORK/inventory.yml" "$WORK/play.yml" --limit "$1"
+  ANSIBLE_CONFIG="$ROOT/ansible/ansible.cfg" ansible-playbook -i "$WORK/inventory.yml" "$WORK/play.yml" --limit "$1" "${@:2}"
 }
 for scenario in bad_unit bad_gate linked_gate linked_directory; do
   if run_case "$scenario" >"$WORK/$scenario/result.log" 2>&1; then
@@ -197,7 +238,20 @@ for scenario in bad_unit bad_gate linked_gate linked_directory; do
   grep -Eq 'unknown|linked' "$WORK/$scenario/result.log" || { cat "$WORK/$scenario/result.log" >&2; exit 1; }
   [[ ! -e "$WORK/$scenario/calls" && ! -e "$WORK/$scenario/deployment/bin/firewall.sh" ]]
 done
-for scenario in core replica legacy; do
+if ! run_case retry_core -e '{"fixture_firewall_only":true}' >"$WORK/retry_core/partial.log"; then
+  cat "$WORK/retry_core/partial.log" >&2
+  exit 1
+fi
+python3 - "$WORK/retry_core" <<'PY'
+import json, pathlib, sys
+scenario = pathlib.Path(sys.argv[1])
+statefile = scenario/'state.json'
+state = json.loads(statefile.read_text())
+state.update(keepalived_installed=False, keepalived_loaded=False)
+statefile.write_text(json.dumps(state))
+(scenario/'calls').write_text('')
+PY
+for scenario in core replica legacy fresh_core retry_core; do
   if ! run_case "$scenario" >"$WORK/$scenario/result.log"; then cat "$WORK/$scenario/result.log" >&2; exit 1; fi
   if ! run_case "$scenario" >"$WORK/$scenario/repeat.log"; then cat "$WORK/$scenario/repeat.log" >&2; exit 1; fi
   grep -q 'changed=0' "$WORK/$scenario/repeat.log"
@@ -211,17 +265,23 @@ done
 python3 - "$WORK" <<'PY'
 import pathlib, sys
 work = pathlib.Path(sys.argv[1])
-for name in ['core', 'replica', 'legacy']:
+for name in ['core', 'replica', 'legacy', 'fresh_core', 'retry_core']:
     scenario = work/name
     calls = (scenario/'calls').read_text().splitlines()
     action = 'reload' if name == 'legacy' else 'start'
-    assert calls.index('daemon-reload') < calls.index(action+' one-postgres-ha-firewall')
+    if name != 'retry_core':
+        assert calls.index('daemon-reload') < calls.index(action+' one-postgres-ha-firewall')
     assert not any(line.startswith(('restart ', 'stop ')) for line in calls)
-    assert calls.count(action+' one-postgres-ha-firewall') == 1
+    assert calls.count(action+' one-postgres-ha-firewall') == (0 if name == 'retry_core' else 1)
     assert (scenario/'etc/systemd/system/docker.service.d/20-one-postgres-ha-ssd.conf').read_text() == '[Unit]\nRequiresMountsFor=/srv/ssd/docker\n'
     assert (scenario/'etc/systemd/system/docker.service.d/unrelated.conf').read_text() == '[Service]\nNice=5\n'
     assert (scenario/'etc/systemd/system/keepalived.service.d/30-one-postgres-ha-firewall.conf').exists() == (name != 'replica')
+    if name in ['fresh_core', 'retry_core']:
+        assert calls.index('package keepalived policy_rc_d=101 changed=true') < calls.index('daemon-reload')
+        assert calls.count('daemon-reload') == 1, 'Repeated preparation must not reload unchanged service units'
+        assert calls.count('package keepalived policy_rc_d=101 changed=false') == 1
 assert 'fixture firewall failed' in (work/'apply_failure/result.log').read_text()
 assert 'does not require the startup firewall' in (work/'reset_dependencies/result.log').read_text()
 PY
 printf 'PASS: firewall gates preserve existing drop-ins, migrate legacy units without restart, reject unowned paths, and verify loaded dependencies\n'
+printf 'PASS: fresh core preparation installs the stopped Keepalived unit before checking its gate; partial retries reload new units; repeated preparation avoids restarts\n'
