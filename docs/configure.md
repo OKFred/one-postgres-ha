@@ -13,7 +13,7 @@ bash install.sh
 ## 开始前
 
 - 控制端具备 Bash、Docker 和 flock，能通过 SSH 访问三台节点。
-- 节点使用 Debian 派生的 ARM64 系统，并具备 Docker/Compose、Python 3、已挂载 SSD 和可独占 watchdog。
+- 三台节点使用相同架构的 Debian 派生 Linux 系统：全 ARM64 或全 AMD64；具备 Docker/Compose、Python 3、已挂载 SSD 和可独占 watchdog。
 - 三台核心节点处于同一直接相连网络，共用相同的 SSD 挂载路径。
 - SSD 必须本地可写、至少有 20 GiB 空闲，且不含旧 `one-postgres-ha` 数据目录。
 - 在 DHCP 中预留 VIP，并确认地址未被其他设备占用。
@@ -41,6 +41,13 @@ bash install.sh
 | 保存 | 检查配置摘要后输入 `SAVE` |
 
 密码不会显示，也不会出现在配置摘要中。SSH 主机指纹来自网络采集，仍需独立核对。
+向导分别读取三台节点的实际架构，自动写入 `expected_architecture: aarch64`（ARM64）
+或 `expected_architecture: x86_64`（AMD64），无需手动选择。三台架构混用、未知架构或发现不完整时，
+停止配置且不保存可部署的 inventory。生产预检会再次核对所有 PG 节点，包括以后新增的副本；
+手动 inventory 未指定时仍默认 ARM64，AMD64 须在 `all.vars` 明确设置 `expected_architecture: x86_64`，
+让独立备份主机也能读取目标集群架构。
+两种架构共用相同的 SSD、网络、watchdog 和同步复制要求；虚拟机也必须具备可用且独占的 watchdog，不能跳过检查。
+
 通过主机控制台或已有可信管理连接，在三台机器分别执行：
 
 ```bash

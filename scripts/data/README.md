@@ -89,14 +89,17 @@ migration_databases:
 
 业务账号必须非 superuser、非 replication、非 CREATEROLE，并明确列入 `required_roles`。旧库与新库同名，源实例的 bootstrap 管理员必须为默认的 `postgres`，以保留 `GRANTED BY` 语义。示例中应用连接端口为 5432；客户端适配器只修改 host，若线上端口、JDBC 格式或 JSON 结构不同，则拒绝修改并要求先核对。
 
-原生故障验收记录必须来自当前集群的真实测试，最多有效 24 小时；`verify` 的常态健康报告不能冒充这份记录：
+原生故障验收记录必须来自当前集群的真实测试，最多有效 24 小时；`verify` 的常态健康报告不能冒充这份记录。
+新记录使用 `native: true` 和目标集群的 Linux 架构名：AMD64 填 `x86_64`，ARM64 填 `aarch64`。
+下面仅为字段示例，不代表故障测试已经通过：
 
 ```json
 {
   "cluster_name": "one-postgres-ha",
   "system_identifier": "REPLACE_WITH_ACTUAL_IDENTIFIER",
   "completed_at": "REPLACE_WITH_ACTUAL_UTC_TIME",
-  "arm64_native": true,
+  "native": true,
+  "architecture": "x86_64",
   "primary_failure": true,
   "proxy_failure": true,
   "etcd_failure": true,
@@ -108,7 +111,14 @@ migration_databases:
 }
 ```
 
-同时验证 replay LSN 不落后于被确认的事务 LSN；迁移当时须有 streaming 同步备库。SQL 文件、凭据和现场证据缺失、过期或校验失败时均停止。
+Ansible 将私有 inventory 的 `expected_architecture` 写入备份主机的 `data/config.json`，
+与证据中的 `architecture` 精确比较。手工 inventory 应在 `all.vars` 定义该值，避免只对 PG 节点生效。
+旧 inventory 或 data config 缺少该字段时按 `aarch64` 处理；
+只含 `arm64_native: true` 的旧格式证据也仅能用于 ARM64 目标，不能证明 AMD64 原生验收。
+带有 `native` 或 `architecture` 的记录必须通过新格式检查，不以旧字段覆盖失败结果。
+
+同时验证 replay LSN 不落后于被确认的事务 LSN；迁移当时须有 streaming 同步备库。
+SQL 文件、凭据和现场证据缺失、过期、架构不匹配或校验失败时均停止。
 
 ```bash
 bash ops.sh migrate-plan one_minihouse
@@ -168,11 +178,16 @@ bash ops.sh migrate-apply nexus
 
 ## 本地回归
 
-在具有 Linux Docker、Bash、jq、flock、openssl、sqlite3 的开发环境执行：
+在具有 Linux Docker、Ansible、Bash、jq、flock、openssl、sqlite3 的开发环境执行：
 
 ```bash
 bash scripts/data/test-integration.sh
 bash scripts/data/test-client.sh
+bash scripts/data/test-acceptance.sh
 ```
 
-第一项只创建隔离测试容器，验证 PG17→18 角色/密码/成员关系、ACL/RLS/序列、冻结与其它库不受影响、逻辑备份及危险回退拒绝。结果保存在忽略的 `.local/data-tests/`。第二项验证客户端只改 host、保留其他配置，以及未 checkpoint 的 SQLite WAL 已提交记录能够进入在线备份。两者均不连接 inventory 中的现场服务器；Docker/Ansible、ARM64 原生和真实应用验收分别记录。
+第一项只创建隔离测试容器，验证 PG17 角色/密码/成员关系、ACL/RLS/序列、冻结与其它库不受影响、逻辑备份及危险回退拒绝。
+结果保存在忽略的 `.local/data-tests/`。第二项验证客户端只改 host、保留其他配置，以及未 checkpoint 的 SQLite WAL 已提交记录能够进入在线备份。
+第三项不需要 Docker，检查原生证据的双架构匹配、旧 ARM64 兼容、有效期、集群身份及复制状态拒绝条件，
+并在临时本机 inventory 中渲染实际 Ansible 私有配置任务，验证架构传递和无效值拒绝。
+这些测试均不连接 inventory 中的现场服务器；Docker/Ansible、AMD64／ARM64 原生和真实应用验收分别记录。

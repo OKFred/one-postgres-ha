@@ -1,6 +1,6 @@
 # one-postgres-ha
 
-三台专用 Linux ARM64 服务器上的 PostgreSQL 17 高可用部署工具。
+三台同构专用 Linux AMD64 或 ARM64 服务器上的 PostgreSQL 17 高可用部署工具。
 使用 Bash 命令入口、Ansible 配置部署和 Docker Compose 容器。
 
 源码采用 [MIT](LICENSE)。第三方组件保留各自许可证，见 [THIRD_PARTY.md](THIRD_PARTY.md)。
@@ -10,8 +10,8 @@
 
 | 项目 | 范围 |
 | --- | --- |
-| 生产部署 | ARM64 Linux，三个核心节点及可选新增 PG 副本 |
-| 宿主工具自动安装 | Debian 13 ARM64；其他系统需自行准备并验收 |
+| 部署架构 | 全 AMD64 或全 ARM64 Linux，三个核心节点及同架构新增 PG 副本；不支持混合架构集群 |
+| 宿主工具自动安装 | Debian 13 AMD64／ARM64；其他系统需自行准备并验收 |
 | 网络与存储 | 核心节点在同一直接相连网络；各自本地 SSD；独占硬件 watchdog |
 | 测试 | AMD64、ARM64 隔离 CI；现场故障验收单独记录 |
 | 业务迁移 | `one_minihouse`、`nexus` 专用适配器，其他应用需另写并验收适配器 |
@@ -43,7 +43,7 @@ etcd 使用双向 TLS；PostgreSQL 和 Patroni 管理 API 当前未启用 TLS，
 控制端需要 Bash、Docker、flock、Git。Windows 使用 WSL，并启用 Docker Desktop 对该发行版的集成。
 目标服务器需要 Docker Compose、Python 3、现有 SSD 挂载和可独占使用的 watchdog。
 
-Debian 13 ARM64 首次缺少 Docker 时，在目标机器上先运行：
+Debian 13 AMD64／ARM64 首次缺少 Docker 时，在目标机器上先运行：
 
     bash scripts/prepare-host.sh /your/ssd/mount --plan
     bash scripts/prepare-host.sh /your/ssd/mount --apply
@@ -64,7 +64,9 @@ bash install.sh
 `--apply` 不跳过配置、主机指纹或预检，`--plan`、`--apply`、`--yes` 不能混用或重复。
 
 向导集中询问三台节点 IP、VIP、SSH 身份和共用 SSD 挂载路径，
-只读检测主机、网卡、Keepalived 版本及控制端管理来源，生成私有配置。
+只读检测主机、CPU 架构、网卡、Keepalived 版本及控制端管理来源，生成私有配置。
+三台架构必须一致，向导按实际检测保存 `expected_architecture: x86_64` 或 `aarch64`；
+手工配置应将该字段放在 `all.vars`，供 PG 节点和独立备份主机共同读取；旧 inventory 未填写时继续按 ARM64 检查。
 SSH 指纹须与各主机控制台核对，VIP 须自行预留；确认后才保存。
 默认在节点构建 PostgreSQL 镜像，也可填写预构建镜像的固定 digest。
 备份初始关闭，接入业务前另行配置并验收。
@@ -250,7 +252,9 @@ oneMiniHouse 首批迁移，保留队列、角色、权限、RLS、Grafana UID �
     bash ops.sh package
 
 CI 配置为在 AMD64、ARM64 runner 上构建并运行隔离测试。隔离测试明确禁用 watchdog；
+两种架构的 CI 通过不等于完成真实三节点 HA 验收，也不能证明 VM 提供了独占硬件 watchdog。
 现场 watchdog、VRRP、真实应用和备份设备需单独验收，结果记录在忽略的 .local/ 目录。
+迁移原生验收使用 `native: true` 和与目标一致的 `architecture`，详见 [数据迁移](scripts/data/README.md)。
 原生空集群故障测试步骤及临时助手见 [原生验收流程](docs/native-acceptance.md)。
 部署包只含 Git 已提交源码，输出到 .local/dist/，附 SHA256。
 

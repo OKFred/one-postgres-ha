@@ -26,8 +26,6 @@
       - admin_cidrs | default([]) | length > 0
       - client_cidrs | default([]) | length > 0
       - vip_reserved | default(false) | bool
-      - expected_architecture == 'aarch64' or deployment_environment == 'test'
-      - ansible_facts.architecture == expected_architecture
       - ansible_facts.system == 'Linux'
       - deployment_root is match('^/[A-Za-z0-9_./-]+$')
       - deployment_root not in ['/', '/etc', '/var', '/opt', '/srv', '/home', '/usr']
@@ -36,6 +34,14 @@
       - data_root is match('^/[A-Za-z0-9_./-]+$')
       - data_root.startswith(data_mount.rstrip('/') + '/')
     fail_msg: Invalid inventory, architecture, or unsafe storage path.
+
+- name: Require supported uniform node architecture
+  ansible.builtin.assert:
+    that:
+      - expected_architecture in ['aarch64', 'x86_64']
+      - ansible_facts.architecture == expected_architecture
+      - groups.pg_nodes | map('extract', hostvars, ['ansible_facts', 'architecture']) | unique | list == [expected_architecture]
+    fail_msg: All PostgreSQL nodes must match expected_architecture (aarch64 or x86_64); mixed or unknown architectures are unsupported.
 
 - name: Validate allowlist CIDRs before rendering host firewall rules
   ansible.builtin.assert:

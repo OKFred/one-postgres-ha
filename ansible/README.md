@@ -5,9 +5,9 @@
 ## 前置条件
 
 - 每台Linux主机已安装Docker、Compose插件、Python3、OpenSSL、`iproute2`、`psmisc`、iptables及curl，管理账号可sudo。`preflight`和`deploy`不自动安装Docker。
-- 首次准备Debian13 ARM64宿主机，先显式运行`bash scripts/prepare-host.sh /实际SSD挂载点 --plan`，检查后使用`--apply`安装固定版本工具及配置Docker存储。该入口在目标宿主机执行。
+- 首次准备Debian13 AMD64或ARM64宿主机，先显式运行`bash scripts/prepare-host.sh /实际SSD挂载点 --plan`，检查后使用`--apply`安装固定版本工具及配置Docker存储。该入口在目标宿主机执行并自动识别软件包架构。
 - SSD已有文件系统、已挂载且有足够余量。宿主准备和Ansible部署均不格式化磁盘、不挂载猜测设备、不接管未知非空目录。
-- 生产节点为ARM64；CI可显式设置`deployment_environment: test`及匹配架构，但watchdog检查仍不会降级。
+- 生产节点支持全AMD64（`x86_64`）或全ARM64（`aarch64`），核心节点及新增副本必须与`expected_architecture`一致。向导自动填写该值，旧inventory默认保留`aarch64`；不接受混合或未知架构，`deployment_environment: test`也不能绕过这些检查。
 - 三个核心节点在同一直接相连网络，VIP已在地址池预留，设置`vip_reserved: true`；所有节点名与inventory hostname保持一致。
 - 核心节点配置精确的`keepalived_package_version`，例如先用`apt-cache policy keepalived`核实版本。未知现有Keepalived配置会被拒绝覆盖。
 - Watchdog是可用字符设备，无其他服务占用，systemd RuntimeWatchdog关闭。本轮只读检查不打开设备；实际整机重启保护必须现场验收。

@@ -5,7 +5,7 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 source "$ROOT/versions.lock"
 die() { printf 'prepare-host: %s\n' "$1" >&2; exit 2; }
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
-  printf 'Usage: bash scripts/prepare-host.sh SSD_MOUNT [--plan|--apply]\nDefault: read-only plan. Debian 13 ARM64 only; never partitions or formats disks.\n'
+  printf 'Usage: bash scripts/prepare-host.sh SSD_MOUNT [--plan|--apply]\nDefault: read-only plan. Debian 13 AMD64 or ARM64; never partitions or formats disks.\n'
   exit 0
 fi
 [[ $# -ge 1 && $# -le 2 ]] || die 'Expected an explicit SSD mount path and optional --plan or --apply'
@@ -14,7 +14,11 @@ MODE=${2:---plan}
 [[ -r /etc/os-release ]] || die 'Run this script on the target Debian host'
 source /etc/os-release
 [[ ${ID:-} == debian && ${VERSION_ID:-} == 13 && ${VERSION_CODENAME:-} == trixie ]] || die 'Only Debian 13 Trixie is supported'
-[[ $(dpkg --print-architecture) == arm64 ]] || die 'The pinned host packages target ARM64'
+ARCHITECTURE=$(dpkg --print-architecture)
+case "$ARCHITECTURE" in
+  amd64 | arm64) ;;
+  *) die 'Only AMD64 and ARM64 host packages are supported' ;;
+esac
 for tool in findmnt lsblk realpath systemctl; do command -v "$tool" >/dev/null || die "Missing $tool"; done
 SSD=$(realpath -e -- "$1")
 [[ "$SSD" != / && "$SSD" =~ ^/[a-zA-Z0-9_/-]+$ ]] || die 'Use an absolute SSD mount path with simple directory names'
@@ -40,7 +44,7 @@ KEY=/etc/apt/keyrings/docker.asc
 MARKER=$(printf 'one-postgres-ha-host-v1\n%s\n%s' "$DOCKER_ROOT" "$CONTAINERD_ROOT")
 DOCKER_JSON=$(printf '{"data-root":"%s","log-driver":"json-file","log-opts":{"max-size":"10m","max-file":"3"}}' "$DOCKER_ROOT")
 CONTAINERD_TOML=$(printf 'version = 3\nroot = "%s"\nstate = "/run/containerd"' "$CONTAINERD_ROOT")
-REPO_TEXT=$'Types: deb\nURIs: https://download.docker.com/linux/debian\nSuites: trixie\nComponents: stable\nArchitectures: arm64\nSigned-By: /etc/apt/keyrings/docker.asc'
+REPO_TEXT=$(printf 'Types: deb\nURIs: https://download.docker.com/linux/debian\nSuites: trixie\nComponents: stable\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/docker.asc' "$ARCHITECTURE")
 SYSTEMD_UNIT_ROOT=/etc/systemd/system
 check_mount_dependencies() {
   local service directory file root expected entry firewall_expected
@@ -124,7 +128,7 @@ for spec in "${PACKAGES[@]}"; do
   installed=$(dpkg-query -W -f='${Version}' "${spec%%=*}" 2>/dev/null || true)
   [[ -z "$installed" || "$installed" == "${spec#*=}" ]] || die 'Existing Docker package versions differ; upgrades and downgrades require manual review'
 done
-printf 'Docker data root: %s\ncontainerd data root: %s\nPinned packages: %s\n' "$DOCKER_ROOT" "$CONTAINERD_ROOT" "${PACKAGES[*]}"
+printf 'Host package architecture: %s\nDocker data root: %s\ncontainerd data root: %s\nPinned packages: %s\n' "$ARCHITECTURE" "$DOCKER_ROOT" "$CONTAINERD_ROOT" "${PACKAGES[*]}"
 [[ "$MODE" == --apply ]] || { printf 'PLAN_ONLY: no files, services, network or disks changed.\n'; exit 0; }
 [[ $(id -u) == 0 ]] || die '--apply requires root'
 if [[ "$OWNED" == true ]] && running_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null); then

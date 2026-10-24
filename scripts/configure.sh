@@ -7,7 +7,8 @@ HELPER="$ROOT/scripts/configure.py"
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
 if [[ "${1:-}" == --help && $# -eq 1 ]]; then
   printf '%s\n' 'Usage: bash ops.sh configure' \
-    'Prepare a new three-node ARM64 cluster configuration interactively.' \
+    'Prepare a new three-node ARM64 or AMD64 cluster configuration interactively.' \
+    'All nodes must use the same architecture; discovery selects the inventory value.' \
     'No deployment, disk changes, database passwords or certificates are created.' \
     'Existing inventory, known_hosts, controller.env or secrets are never overwritten.'
   exit 0
@@ -89,6 +90,7 @@ for index in 0 1 2; do
     || die "Read-only probe failed on $ip; nothing was saved"
 done
 python3 "$HELPER" collect "$STAGE" "$vip" "$user" "${nodes[@]}"
+architecture=$(python3 "$HELPER" field "$STAGE" architecture)
 mount_default=$(python3 "$HELPER" field "$STAGE" mount_default)
 prompt 'Shared SSD mount' "$mount_default"
 mount=$ANSWER
@@ -103,8 +105,8 @@ postgres=$ANSWER
 prompt 'Tools image (project local tag or registry@sha256:digest)' "${HA_CONFIGURE_TOOLS_IMAGE:-one-postgres-ha-tools:pg17.11}"
 tools=$ANSWER
 python3 "$HELPER" render "$STAGE" "$mount" "$cidr" "$postgres" "$tools" "$key_host"
-printf '\nConfiguration summary:\n  Nodes: %s, %s, %s\n  VIP: %s\n  SSD: %s\n  SSH user: %s\n  Clients: %s\n  PostgreSQL image: %s\n  Tools image: %s\n  Backups: disabled\n' \
-  "${nodes[@]}" "$vip" "$mount" "$user" "$cidr" "${postgres:-build from pinned source}" "$tools" >&2
+printf '\nConfiguration summary:\n  Nodes: %s, %s, %s\n  Architecture: %s\n  VIP: %s\n  SSD: %s\n  SSH user: %s\n  Clients: %s\n  PostgreSQL image: %s\n  Tools image: %s\n  Backups: disabled\n' \
+  "${nodes[@]}" "$architecture" "$vip" "$mount" "$user" "$cidr" "${postgres:-build from pinned source}" "$tools" >&2
 prompt 'Type SAVE to write new private configuration'
 [[ "$ANSWER" == SAVE ]] || die 'Configuration cancelled; nothing was saved'
 python3 "$HELPER" publish "$ROOT" "$STAGE"
