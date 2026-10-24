@@ -176,9 +176,6 @@
   when: pg_ha_udev.changed
   changed_when: true
 
-- name: Install and apply the firewall startup gate
-  ansible.builtin.include_tasks: firewall.yml
-
 - name: Install the pinned Keepalived package
   ansible.builtin.apt:
     name: "keepalived={{ keepalived_package_version }}"
@@ -187,6 +184,9 @@
     policy_rc_d: 101
   when: inventory_hostname in groups.core_nodes
   register: pg_ha_keepalived_package
+
+- name: Install and apply the firewall startup gate
+  ansible.builtin.include_tasks: firewall.yml
 
 - name: Install the local proxy readiness check before validating Keepalived
   ansible.builtin.copy:
