@@ -14,6 +14,8 @@
 - 全节点磁盘版本门槛、候选镜像实际探针脚本、清理及保留数据恢复测试已通过；
   使用临时目录、真实 Ansible 和模拟 Docker，不代表真实集群验收。
 - Bash／ShellCheck、YAML、Ansible production lint 已通过。
+- `community.crypto` 保持 3.5.0，改用官方签名发布标签对应的固定 Git 提交构建，
+  避免 Galaxy 下载服务返回 HTTP 500 阻塞工具镜像。WSL 实际安装、版本核对和所需模块加载已通过。
 - 数据工具的 PG17 小版本差异、跨大版本拒绝、归档版本及无生产连接的恢复回归已通过；
   备份归属、其余运维隔离回归和源码／公开导出脱敏检查也已通过。
 - WSL 直接执行 `tests/check.sh` 在 `test-local-replication.sh` 因缺少 `postgres` 系统账号停止，
