@@ -1,3 +1,6 @@
 collections:
-  - name: community.crypto
-    version: 3.5.0
+  # Official community.crypto 3.5.0 release, pinned to its signed tag's commit.
+  # Build from upstream source so Galaxy artifact outages do not block installs.
+  - name: https://github.com/ansible-collections/community.crypto.git
+    type: git
+    version: fce4f220c3b54d5c6eb9c94ef74fc25ae3f5fb91

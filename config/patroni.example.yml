@@ -1,6 +1,6 @@
 # Reference only: Ansible renders the actual per-node file from private inventory.
 # Passwords are loaded by the image entrypoint from /run/secrets; never put them here.
-scope: example-pg18
+scope: example-pg17
 namespace: /one-postgres-ha/
 name: node-01
 
@@ -57,7 +57,7 @@ postgresql:
   listen: 127.0.0.1,192.0.2.11:5433
   connect_address: 192.0.2.11:5433
   data_dir: /var/lib/postgresql/data
-  bin_dir: /usr/lib/postgresql/18/bin
+  bin_dir: /usr/lib/postgresql/17/bin
   pgpass: /run/patroni/pgpass
   authentication:
     superuser:

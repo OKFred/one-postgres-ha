@@ -75,7 +75,7 @@ case $operation in
       fi
       sleep 5
     done
-    [[ $ok = true ]] || die 'local backlog or actual post-switch delivery did not recover; PG18 repair is required'
+    [[ $ok = true ]] || die 'local backlog or actual post-switch delivery did not recover; repair the target PostgreSQL17 deployment'
     ;;
   nexus-switch | nexus-check)
     [[ $# = 4 ]] || die 'nexus-switch PROPERTIES KEY OLD_HOST NEW_HOST'

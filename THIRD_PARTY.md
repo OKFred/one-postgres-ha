@@ -8,7 +8,7 @@
 
 | 组件 | 仓库指定版本 | 许可证与官方来源 |
 | --- | --- | --- |
-| PostgreSQL | 18.6 | [PostgreSQL License](https://www.postgresql.org/about/licence/) |
+| PostgreSQL | 17.11 | [PostgreSQL License](https://www.postgresql.org/about/licence/) |
 | Patroni | 4.1.5 | [MIT](https://github.com/patroni/patroni/blob/v4.1.5/LICENSE) |
 | etcd | 3.6.15 | [Apache-2.0](https://github.com/etcd-io/etcd/blob/v3.6.15/LICENSE) |
 | HAProxy | 3.2.25 | 核心为 GPL-2.0，可导出头文件为 LGPL-2.1，带 OpenSSL 例外；个别文件以自身声明为准。见[官方 3.2 文档](https://www.haproxy.org/download/3.2/doc/intro.txt)及[该版本源码包](https://www.haproxy.org/download/3.2/src/haproxy-3.2.25.tar.gz)中的 `LICENSE`、`doc/gpl.txt`、`doc/lgpl.txt`。 |

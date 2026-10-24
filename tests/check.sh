@@ -30,6 +30,8 @@ bash tests/test-publish-images.sh
 bash tests/test-entrypoints.sh
 bash tests/test-menu.sh
 bash tests/test-prebuilt-images.sh
+bash tests/test-postgres-baseline.sh
+bash tests/test-postgres-major-guard.sh
 bash tests/test-cleanup-node.sh
 bash tests/test-retained-recovery.sh
 bash tests/test-secrets.sh
@@ -43,6 +45,7 @@ bash tests/test-host-tools.sh
 bash tests/test-native-probe.sh
 bash tests/test-local-replication.sh
 bash tests/test-backup-ownership.sh
+bash scripts/data/test-versions.sh
 bash tests/test-firewall-gate.sh
 bash tests/test-source-scan.sh
 bash tests/test-public-export.sh

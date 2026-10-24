@@ -181,6 +181,68 @@
     that: pg_ha_marker_content.content | b64decode | trim == cluster_name
   when: pg_ha_marker.stat.exists
 
+- name: Inspect the PostgreSQL directory without following links
+  ansible.builtin.stat:
+    path: "{{ data_root }}/postgres"
+    follow: false
+  register: pg_ha_pgdata_stat
+
+- name: Require an unlinked PostgreSQL directory before reading its major version
+  ansible.builtin.assert:
+    that:
+      - not pg_ha_pgdata_stat.stat.exists or pg_ha_pgdata_stat.stat.isdir
+      - not pg_ha_pgdata_stat.stat.islnk | default(false)
+    fail_msg: PostgreSQL storage must be a real directory; no linked data path is adopted.
+
+- name: Inspect the PostgreSQL major version without following links
+  ansible.builtin.stat:
+    path: "{{ data_root }}/postgres/PG_VERSION"
+    follow: false
+  register: pg_ha_pg_version_stat
+
+- name: Require a protected ordinary PostgreSQL version file
+  ansible.builtin.assert:
+    that:
+      - not pg_ha_pg_version_stat.stat.exists or pg_ha_pg_version_stat.stat.isreg
+      - not pg_ha_pg_version_stat.stat.islnk | default(false)
+      - not pg_ha_pg_version_stat.stat.exists or pg_ha_pg_version_stat.stat.uid == postgres_uid | int
+      - not pg_ha_pg_version_stat.stat.exists or pg_ha_pg_version_stat.stat.nlink == 1
+    fail_msg: PostgreSQL version metadata must be an ordinary owned file; preserve unsafe storage for inspection.
+
+- name: Read the existing PostgreSQL major version without changing data
+  ansible.builtin.slurp:
+    src: "{{ data_root }}/postgres/PG_VERSION"
+  register: pg_ha_pg_version_content
+  when: pg_ha_pg_version_stat.stat.exists
+
+- name: Refuse existing PostgreSQL data from another major version before deployment
+  ansible.builtin.assert:
+    that: pg_ha_pg_version_content.content | b64decode | trim == '17'
+    fail_msg: >-
+      This deployment supports PostgreSQL 17 data only. Existing PG18 or other-major data is preserved;
+      no downgrade, migration or container reconciliation was attempted.
+  when: pg_ha_pg_version_stat.stat.exists
+
+- name: Inspect uninitialized PostgreSQL directories without creating them
+  ansible.builtin.find:
+    paths: "{{ data_root }}/postgres"
+    recurse: false
+    hidden: true
+    file_type: any
+    follow: false
+  register: pg_ha_uninitialized_pg_children
+  when:
+    - pg_ha_pgdata_stat.stat.exists
+    - not pg_ha_pg_version_stat.stat.exists
+
+- name: Reject nonempty PostgreSQL data without trustworthy major-version metadata
+  ansible.builtin.assert:
+    that: pg_ha_uninitialized_pg_children.matched == 0
+    fail_msg: Nonempty PostgreSQL storage has no PG_VERSION; preserve it for inspection before deployment.
+  when:
+    - pg_ha_pgdata_stat.stat.exists
+    - not pg_ha_pg_version_stat.stat.exists
+
 - name: Read available disk space
   ansible.builtin.command:
     argv: [df, -B1, --output=avail, "{{ data_mount }}"]
@@ -194,7 +256,7 @@
 - name: Check the required tools
   ansible.builtin.shell: |
     for tool in docker ss fuser openssl iptables ip6tables flock curl \
-      systemctl udevadm iptables-restore ip6tables-restore; do
+      systemctl udevadm iptables-restore ip6tables-restore timeout; do
       command -v "$tool" >/dev/null || { printf 'Missing required tool: %s\n' "$tool" >&2; exit 1; }
     done
   args:

@@ -10,10 +10,19 @@ export IMAGE_FIXTURE_LOG="$WORK/docker.log"
 cat >"$WORK/bin/docker" <<'MOCK'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-printf '%s\t' "$@" >>"$IMAGE_FIXTURE_LOG"
+for argument in "$@"; do printf '%s\t' "${argument//$'\n'/\\n}" >>"$IMAGE_FIXTURE_LOG"; done
 printf '\n' >>"$IMAGE_FIXTURE_LOG"
 if [[ "$1 ${2:-}" == 'image inspect' ]]; then
-  [[ ${IMAGE_FIXTURE_CACHED:-false} == true ]]
+  if [[ ${3:-} == --format ]]; then
+    [[ $4 == '{{.Id}}' && $5 == "$IMAGE_FIXTURE_CONFIG_IMAGE" ]]
+    printf 'sha256:%064d\n' 2
+  else
+    [[ ${IMAGE_FIXTURE_CACHED:-false} == true ]]
+  fi
+elif [[ "$1 ${2:-} ${3:-} ${4:-} ${5:-} ${6:-}" == 'compose --env-file .env config --format json' ]]; then
+  printf '{"services":{"postgres":{"image":"%s"}}}\n' "$IMAGE_FIXTURE_CONFIG_IMAGE"
+elif [[ $1 == run && ${3:-} == --init && ${4:-} == --pull=never ]]; then
+  printf 'PostgreSQL 17 project image verified.\n'
 fi
 MOCK
 chmod +x "$WORK/bin/docker"
@@ -59,7 +68,8 @@ prepare = roles/'cluster/tasks/prepare-image.yml'
 tasks = yaml.safe_load(prepare.read_text())
 for task in tasks:
     if 'ansible.builtin.command' in task:
-        task['ansible.builtin.command']['argv'][0] = str(fake)
+        arguments = task['ansible.builtin.command']['argv']
+        arguments[arguments.index('docker')] = str(fake)
 prepare.write_text(yaml.safe_dump(tasks))
 source = work/'source/images/postgres'
 source.mkdir(parents=True)
@@ -102,7 +112,7 @@ for name, mode, image, accepted, action in cases:
     rendered = template.render(**variables)
     settings = [line for line in rendered.splitlines() if line.startswith('POSTGRES_HA_IMAGE=')]
     assert len(settings)==1, (name,settings)
-    expected = image or 'one-postgres-ha:pg18.6-patroni4.1.5'
+    expected = image or 'one-postgres-ha:pg17.11-patroni4.1.5'
     assert settings[0]=='POSTGRES_HA_IMAGE='+expected, (name,settings)
 # Both initial and online replica deployments must share the production selector.
 deploy = yaml.safe_load((root/'ansible/deploy.yml').read_text())
@@ -114,20 +124,29 @@ assert any(task.get('ansible.builtin.include_tasks')=='prepare-image.yml'
 PY
 export ANSIBLE_CONFIG="$ROOT/ansible/ansible.cfg" ANSIBLE_ROLES_PATH="$WORK/roles"
 python3 - "$WORK" <<'PY'
-import json, pathlib, subprocess, sys
+import json, os, pathlib, subprocess, sys
 work = pathlib.Path(sys.argv[1])
 for name, mode, image, accepted, action in json.loads((work/'cases.json').read_text()):
     log = work/'docker.log'
     log.write_text('')
+    environment = os.environ.copy()
+    environment['IMAGE_FIXTURE_CONFIG_IMAGE'] = image or 'one-postgres-ha:pg17.11-patroni4.1.5'
     result = subprocess.run(['ansible-playbook','-i',str(work/'inventory.yml'),str(work/(name+'.yml'))],
-        stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+        stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,env=environment)
     if (result.returncode==0) != accepted:
         print(result.stdout, file=sys.stderr)
         raise SystemExit('Unexpected image gate outcome: '+name)
     commands = log.read_text().splitlines()
     if accepted:
-        assert len(commands)==1, (name,commands)
+        assert len(commands)==4, (name,commands)
         assert commands[0].split('\t')[:6]==['compose','--env-file','.env',action,'postgres',''], commands
+        assert commands[1].split('\t')==['compose','--env-file','.env','config','--format','json',''], commands
+        assert commands[2].split('\t')==['image','inspect','--format','{{.Id}}',environment['IMAGE_FIXTURE_CONFIG_IMAGE'],''], commands
+        probe = commands[3].split('\t')
+        assert probe[:6]==['run','--rm','--init','--pull=never','--network','none'], probe
+        assert '--read-only' in probe and probe[probe.index('--entrypoint')+1]=='/bin/sh', probe
+        assert probe[probe.index('/bin/sh')+1]=='sha256:'+f'{2:064d}', probe
+        assert not any(argument in ('stop','start','up','restart') for command in commands for argument in command.split('\t')), commands
         assert (work/name/'images/postgres/Dockerfile').exists()==(mode=='source'), name
     else:
         assert not commands and not (work/name/'images').exists(), name

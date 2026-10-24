@@ -156,7 +156,8 @@ try:
         if regular(data+'/.one-postgres-ha-join-pending'):
             require(pathlib.Path(data+'/.one-postgres-ha-join-pending').read_text().strip() == cluster, 'Pending marker identity mismatch')
         if regular(data+'/postgres/PG_VERSION',owner=999):
-            require(pathlib.Path(data+'/postgres/PG_VERSION').read_text().strip() == '18', 'Unexpected PostgreSQL major version')
+            require(pathlib.Path(data+'/postgres/PG_VERSION').read_text().strip() == '17',
+                    'Only PostgreSQL 17 data is supported; use the matching old release to uninstall PG18 data, not this deployment')
         if not core: require(not pathlib.Path(data+'/etcd').exists(), 'A PG-only node contains etcd data')
         regular(deployment+'/.env',True)
         regular(deployment+'/docker-compose.yml',True)
@@ -220,7 +221,8 @@ try:
         require(deployed and service in (['postgres','etcd','haproxy'] if core else ['postgres']), 'Unknown project container or missing ownership')
         extra=[item for item in mounts if item.get('Type') not in ['bind','tmpfs']]
         if extra:
-            # PG18's official base declares this parent volume; PGDATA itself is the SSD bind below it.
+            # Retain the audited legacy parent-volume exception. PG17 normally
+            # declares PGDATA itself, which is replaced by the verified SSD bind.
             require(service=='postgres' and len(extra)==1 and extra[0].get('Type')=='volume'
                     and extra[0].get('Destination')=='/var/lib/postgresql'
                     and re.fullmatch(r'[0-9a-f]{64}',extra[0].get('Name','')), 'Unknown extra project volume')
@@ -400,7 +402,7 @@ if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != 999 or
 result=subprocess.run(['docker','run','--rm','--network','none','--read-only','--cap-drop','ALL',
     '--security-opt','no-new-privileges','--user','999:999','--env','LC_ALL=C',
     '--mount','type=bind,src='+str(data)+',dst=/var/lib/postgresql/data,readonly',
-    '--entrypoint','/usr/lib/postgresql/18/bin/pg_controldata',image,'/var/lib/postgresql/data'],
+    '--entrypoint','/usr/lib/postgresql/17/bin/pg_controldata',image,'/var/lib/postgresql/data'],
     capture_output=True,text=True,timeout=60)
 identities=re.findall(r'^Database system identifier:\s+([1-9][0-9]{0,19})\s*$',result.stdout,re.M)
 states=re.findall(r'^Database cluster state:\s+(.+?)\s*$',result.stdout,re.M)

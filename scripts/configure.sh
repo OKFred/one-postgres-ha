@@ -100,7 +100,7 @@ prompt 'Client IPv4 CIDR' "$network"
 cidr=$ANSWER
 prompt 'PostgreSQL image (empty builds from pinned source; otherwise registry@sha256:digest)'
 postgres=$ANSWER
-prompt 'Tools image (project local tag or registry@sha256:digest)' "${HA_CONFIGURE_TOOLS_IMAGE:-one-postgres-ha-tools:0.1.0}"
+prompt 'Tools image (project local tag or registry@sha256:digest)' "${HA_CONFIGURE_TOOLS_IMAGE:-one-postgres-ha-tools:pg17.11}"
 tools=$ANSWER
 python3 "$HELPER" render "$STAGE" "$mount" "$cidr" "$postgres" "$tools" "$key_host"
 printf '\nConfiguration summary:\n  Nodes: %s, %s, %s\n  VIP: %s\n  SSD: %s\n  SSH user: %s\n  Clients: %s\n  PostgreSQL image: %s\n  Tools image: %s\n  Backups: disabled\n' \

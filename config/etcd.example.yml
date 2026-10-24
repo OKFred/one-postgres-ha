@@ -6,7 +6,7 @@ listen-peer-urls: https://192.0.2.11:2380
 initial-advertise-peer-urls: https://192.0.2.11:2380
 initial-cluster: node-01=https://192.0.2.11:2380,node-02=https://192.0.2.12:2380,node-03=https://192.0.2.13:2380
 initial-cluster-state: new
-initial-cluster-token: example-pg18
+initial-cluster-token: example-pg17
 client-transport-security:
   cert-file: /run/secrets/etcd.crt
   key-file: /run/secrets/etcd.key

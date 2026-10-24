@@ -15,8 +15,8 @@
 - name: Validate this member's invariants
   ansible.builtin.assert:
     that:
-      - pg_ha_sql.server_version_num | int >= 180000
-      - pg_ha_sql.server_version_num | int < 190000
+      - pg_ha_sql.server_version_num | int >= 170000
+      - pg_ha_sql.server_version_num | int < 180000
       - pg_ha_sql.data_checksums == 'on'
       - pg_ha_sql.synchronous_commit == 'on'
       - pg_ha_verified_patroni.json.state == 'running'

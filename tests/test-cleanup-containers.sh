@@ -20,11 +20,12 @@ if [[ ${1:-} != --inside ]]; then
   CANARY_VOLUME="$RUNID-canary-volume"
   CONTROLLER="$RUNID-controller"
   RUN_IMAGE="$RUNID-tools"
-  TOOLS_IMAGE=${HA_TOOLS_IMAGE:-one-postgres-ha-tools:0.1.0}
+  LEGACY_IMAGE="$RUNID-legacy-postgres"
+  TOOLS_IMAGE=${HA_TOOLS_IMAGE:-one-postgres-ha-tools:pg17.11}
   mkdir -p "$ROOT/.local/reports"
   WORK=$(mktemp -d "$ROOT/.local/cleanup-containers.XXXXXXXX")
   cleanup() {
-    local result=$? cid name
+    local result=$? cid name image
     trap - EXIT
     docker cp "$CONTROLLER:$LAB/postgres-volumes.list" "$(host_path "$WORK/postgres-volumes.list")" >/dev/null 2>&1 || true
     while IFS= read -r cid; do
@@ -39,7 +40,7 @@ if [[ ${1:-} != --inside ]]; then
         docker volume rm "$name" >/dev/null 2>&1 || true
       done < <(sort -u "$WORK/postgres-volumes.list")
     fi
-    docker image rm "$RUN_IMAGE" >/dev/null 2>&1 || true
+    for image in "$RUN_IMAGE" "$LEGACY_IMAGE"; do docker image rm "$image" >/dev/null 2>&1 || true; done
     exit "$result"
   }
   LAB=/not-created
@@ -51,9 +52,22 @@ if [[ ${1:-} != --inside ]]; then
   for image in "$PG_IMAGE" "$ETCD_IMAGE" "$HAPROXY_IMAGE"; do
     docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image" >"$WORK/pull.log" 2>&1
   done
+  docker image inspect --format '{{json .Config.Volumes}}' "$PG_IMAGE" | python3 -c 'import json,sys; assert json.load(sys.stdin)=={"/var/lib/postgresql/data":{}}, "PG17 must declare its PGDATA volume, not a parent volume"'
+  # A separate image models the legacy inherited parent-volume exception.
+  # The real PG17 baseline above must not acquire that volume merely to pass cleanup.
+  cat >"$WORK/LegacyPostgres.Dockerfile" <<'DOCKERFILE'
+ARG PG_IMAGE
+FROM ${PG_IMAGE}
+VOLUME ["/var/lib/postgresql"]
+DOCKERFILE
+  if ! docker build --build-arg "PG_IMAGE=$PG_IMAGE" --file "$(host_path "$WORK/LegacyPostgres.Dockerfile")" \
+    -t "$LEGACY_IMAGE" "$(host_path "$WORK")" >"$WORK/legacy-build.log" 2>&1; then
+    tail -n 40 "$WORK/legacy-build.log"
+    die 'Isolated legacy-volume fixture build failed'
+  fi
   cp "$ROOT/scripts/ci/install-compose.sh" "$WORK/install-compose.sh"
   cat >"$WORK/Dockerfile" <<'DOCKERFILE'
-ARG TOOLS_IMAGE=one-postgres-ha-tools:0.1.0
+ARG TOOLS_IMAGE=one-postgres-ha-tools:pg17.11
 FROM docker:29.7.2-cli@sha256:3f4743208d2338c934d7b8bcfbe1bb54c0b2355c510ad5e0f31c0c4a54bd704e AS cli
 FROM ${TOOLS_IMAGE}
 COPY --from=cli /usr/local/bin/docker /usr/local/bin/docker
@@ -74,7 +88,7 @@ DOCKERFILE
     --mount "type=volume,src=$VOLUME,dst=$LAB" \
     --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
     -e LAB="$LAB" -e PROJECT="$RUNID" -e CANARY_VOLUME="$CANARY_VOLUME" \
-    -e PG_IMAGE="$PG_IMAGE" -e ETCD_IMAGE="$ETCD_IMAGE" -e HAPROXY_IMAGE="$HAPROXY_IMAGE" \
+    -e PG_IMAGE="$PG_IMAGE" -e LEGACY_PG_IMAGE="$LEGACY_IMAGE" -e ETCD_IMAGE="$ETCD_IMAGE" -e HAPROXY_IMAGE="$HAPROXY_IMAGE" \
     "$RUN_IMAGE" sleep 900)
   docker cp "$(host_path "$ROOT/scripts/cleanup-node.sh")" "$CONTROLLER:$LAB/original-helper.sh"
   docker cp "$(host_path "${BASH_SOURCE[0]}")" "$CONTROLLER:$LAB/test.sh"
@@ -156,6 +170,7 @@ running() { [[ $(docker inspect --format '{{.State.Running}}' "$1") == "$2" ]]; 
 sql() { docker exec "$(cid postgres)" psql -X -A -t -U postgres -d postgres -c "$1"; }
 etcd() { docker exec "$(cid etcd)" /usr/local/bin/etcdctl --endpoints=http://127.0.0.1:2379 "$@"; }
 make_fixture() {
+  local volume_layout=${1:-pg17}
   mkdir -p "$DEPLOY/config" "$DEPLOY/secrets" "$DATA/postgres" "$DATA/etcd"
   printf '%s\n' "$CLUSTER" >"$DEPLOY/.one-postgres-ha-cluster"
   printf '%s\n' "$CLUSTER" >"$DATA/.one-postgres-ha-cluster"
@@ -232,7 +247,19 @@ EOF
   chown 65532:65532 "$DATA/etcd"
   chmod 700 "$DATA/etcd"
   compose up -d --no-build --pull never
-  docker inspect "$(cid postgres)" | python3 -c 'import json,sys; print("\n".join(m["Name"] for m in json.load(sys.stdin)[0]["Mounts"] if m["Type"]=="volume" and m["Destination"]=="/var/lib/postgresql"))' >>"$LAB/postgres-volumes.list"
+  docker inspect "$(cid postgres)" | python3 -c 'import json,re,sys
+mounts=json.load(sys.stdin)[0]["Mounts"]
+volumes=[m for m in mounts if m["Type"]=="volume"]
+binds=[m for m in mounts if m["Type"]=="bind" and m["Destination"]=="/var/lib/postgresql/data"]
+assert len(binds)==1, "The PGDATA SSD bind must replace the PG17 image volume"
+if sys.argv[1]=="pg17":
+    assert not volumes, "PG17 with bound PGDATA must not create an anonymous volume"
+else:
+    assert sys.argv[1]=="legacy" and len(volumes)==1
+    assert volumes[0]["Destination"]=="/var/lib/postgresql"
+    assert re.fullmatch("[0-9a-f]{64}", volumes[0]["Name"])
+    print(volumes[0]["Name"])
+' "$volume_layout" >>"$LAB/postgres-volumes.list"
   local ready=false
   for ((attempt = 0; attempt < 120; attempt++)); do
     if docker exec "$(cid postgres)" pg_isready -h 127.0.0.1 -p 5432 -U postgres >/dev/null 2>&1 && etcd endpoint health >/dev/null 2>&1; then
@@ -276,6 +303,8 @@ stop_and_remove() {
   while IFS= read -r parent_volume; do docker volume inspect "$parent_volume" >/dev/null; done <"$LAB/postgres-volumes.list"
 }
 make_fixture
+[[ ! -s "$LAB/postgres-volumes.list" ]]
+[[ $(sql 'SHOW server_version_num') =~ ^17[0-9]{4}$ ]]
 docker run -d --name "$CANARY" --label "ha.cleanup.fixture=$PROJECT" --network none --init \
   --mount "type=bind,src=$LAB/canary,dst=/canary,readonly" --mount "type=volume,src=$CANARY_VOLUME,dst=/canary-volume" \
   --entrypoint /bin/sleep "$HAPROXY_IMAGE" 600 >/dev/null
@@ -323,7 +352,7 @@ printf 'PASS: mismatched ownership, same-project external containers and data ho
 
 stop_and_remove
 for phase in audit stop-ingress stop-postgres stop-etcd remove; do cleanup_node "$phase" --apply; done
-printf 'PASS: ordered graceful stops remove only owned containers/data; canary and inherited parent volumes remain\n'
+printf 'PASS: PG17 binds PGDATA without anonymous volumes; cleanup preserves the unrelated canary volume\n'
 make_fixture
 SECOND_PG=$(sql 'SELECT system_identifier FROM pg_control_system()')
 SECOND_ETCD=$(etcd endpoint status --write-out=json | python3 -c 'import json,sys; h=json.load(sys.stdin)[0]["Status"]["header"]; print(h["cluster_id"],h["member_id"])')
@@ -339,12 +368,21 @@ SECOND_CIDS=$(compose ps --all --quiet)
 compose up -d --no-build --pull never
 [[ $(compose ps --all --quiet) == "$SECOND_CIDS" ]]
 stop_and_remove
+[[ ! -s "$LAB/postgres-volumes.list" ]]
+PG_IMAGE=$LEGACY_PG_IMAGE
+make_fixture legacy
+[[ $(wc -l <"$LAB/postgres-volumes.list") == 1 ]]
+cleanup_node audit >"$LAB/legacy-preview.json"
+stop_and_remove
+printf 'PASS: separate legacy inherited parent-volume fixture is audited and its anonymous volume is retained\n'
 python3 - "$LAB/report.json" "$FIRST_PG" "$SECOND_PG" "$FIRST_ETCD" "$SECOND_ETCD" "$FIRST_REVISION" "$SECOND_REVISION" <<'PY'
 import json,pathlib,sys
 path,old_pg,new_pg,old_etcd,new_etcd,old_revision,new_revision=sys.argv[1:]
 pathlib.Path(path).write_text(json.dumps({'passed':True,'preview_preserved':True,'ordered_stops':True,
     'external_ownership_refused':True,'external_data_holder_refused':True,'canary_preserved':True,
-    'inherited_anonymous_parent_retained':True,'repeat_cleanup_noop':True,'repeat_compose_no_recreate':True,
+    'pg17_default_anonymous_volumes':0,'pg17_data_volume_replaced_by_bind':True,
+    'legacy_parent_volume_fixture_verified':True,'inherited_anonymous_parent_retained':True,
+    'repeat_cleanup_noop':True,'repeat_compose_no_recreate':True,
     'old_pg_system_identifier':old_pg,'new_pg_system_identifier':new_pg,'old_etcd_identity':old_etcd,'new_etcd_identity':new_etcd,
     'old_etcd_revision':int(old_revision),'new_etcd_revision':int(new_revision),'etcd_ids_may_repeat_with_same_token_and_peer_urls':True,
     'old_sql_table_and_etcd_key_absent':True,'mocked_boundaries':['DockerRootDir','exact lab controller excluded from real ps',

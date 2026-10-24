@@ -22,6 +22,9 @@ IMAGE=$(docker compose config --images postgres)
 docker compose build --print postgres >"$WORK/build.json"
 grep -q 'type=provenance,disabled=true' "$WORK/build.json"
 docker compose build postgres >"$WORK/first-build.log" 2>&1
+docker image inspect --format '{{json .Config.Volumes}}' "$IMAGE" | python3 -c 'import json,sys; assert json.load(sys.stdin)=={"/var/lib/postgresql/data":{}}, "PG17 must inherit only its PGDATA volume"'
+PG_VERSION=$(sed -n 's/^POSTGRES_VERSION=//p' "$ROOT/versions.lock")
+[[ $(docker run --rm --network none --entrypoint postgres "$IMAGE" --version) == "postgres (PostgreSQL) $PG_VERSION "* ]]
 FIRST_IMAGE=$(docker image inspect --format '{{.Id}}' "$IMAGE")
 mkdir "$WORK/config"
 chmod 755 "$WORK/config"

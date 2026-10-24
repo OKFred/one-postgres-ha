@@ -8,7 +8,7 @@ mkdir -p "$PROJECT/scripts" "$PROJECT/images/postgres" "$PROJECT/images/tools" "
 cp "$ROOT/scripts/publish-images.sh" "$PROJECT/scripts/"
 printf '.local\n.git\n' >"$PROJECT/.dockerignore"
 printf '.local/\n' >"$PROJECT/.gitignore"
-printf 'POSTGRES_VERSION=18.6\nPATRONI_VERSION=4.1.5\nPOSTGRES_BASE_IMAGE=postgres:18.6-bookworm@sha256:%064d\n' 1 >"$PROJECT/versions.lock"
+printf 'POSTGRES_VERSION=17.11\nPATRONI_VERSION=4.1.5\nPOSTGRES_BASE_IMAGE=postgres:17.11-bookworm@sha256:%064d\n' 1 >"$PROJECT/versions.lock"
 printf 'FROM scratch\n# committed\n' >"$PROJECT/images/postgres/Dockerfile"
 printf 'FROM scratch\n' >"$PROJECT/images/tools/Dockerfile"
 git -C "$PROJECT" init -q
@@ -73,8 +73,8 @@ bash "$PROJECT/scripts/publish-images.sh" "$PREFIX" --push --builder fixture >"$
 [[ $(grep -c '^buildx build ' "$PUBLISH_LOG") == 2 ]]
 [[ $(grep -c -- '--platform linux/amd64,linux/arm64' "$PUBLISH_LOG") == 2 ]]
 [[ $(grep -c -- '--provenance=false --sbom=false' "$PUBLISH_LOG") == 2 ]]
-grep -q -- '--label org.opencontainers.image.version=pg18.6-patroni4.1.5-' "$PUBLISH_LOG"
-grep -q -- '--label org.opencontainers.image.version=pg18.6-' "$PUBLISH_LOG"
+grep -q -- '--label org.opencontainers.image.version=pg17.11-patroni4.1.5-' "$PUBLISH_LOG"
+grep -q -- '--label org.opencontainers.image.version=pg17.11-' "$PUBLISH_LOG"
 ! grep -q 'latest\|private-fixture' "$PUBLISH_LOG"
 grep -q PUBLISH_COMPLETE "$WORK/output"
 grep -q 'postgres_ha_image=registry.example.com/team/one-postgres-ha@sha256:' "$WORK/output"
@@ -83,4 +83,12 @@ export PUBLISH_FAIL_TOOLS=true
 expect_failure "$PREFIX" --push
 ! grep -q PUBLISH_COMPLETE "$WORK/output"
 [[ -z $(find "$PROJECT/.local/publish" -type d -name context -print -quit) ]]
+unset PUBLISH_FAIL_TOOLS
+printf 'POSTGRES_VERSION=17.11\nPATRONI_VERSION=4.1.5\nPOSTGRES_BASE_IMAGE=postgres:17.10-bookworm@sha256:%064d\n' 1 >"$PROJECT/versions.lock"
+git -C "$PROJECT" add versions.lock
+git -C "$PROJECT" -c user.name=Fixture -c user.email=fixture@example.com commit -qm 'mismatched base fixture'
+: >"$PUBLISH_LOG"
+expect_failure "$PREFIX"
+grep -q 'base tag must match POSTGRES_VERSION' "$WORK/output"
+[[ ! -s $PUBLISH_LOG ]]
 echo 'PASS: publication preview, arguments, immutable tags, auth failure, committed contexts, labels, multiarch metadata and partial failure'

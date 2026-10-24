@@ -33,8 +33,9 @@ export PATRONI_CTL_PASSWORD="$PATRONI_RESTAPI_PASSWORD"
 
 if [[ ${1:-} == patroni ]]; then
   [[ -d "$PGDATA" && -w "$PGDATA" ]] || fail 'PGDATA must be a prepared writable directory'
+  [[ ! -L "$PGDATA/PG_VERSION" ]] || fail 'PG_VERSION must not be a symlink'
   if [[ -f "$PGDATA/PG_VERSION" ]]; then
-    [[ $(<"$PGDATA/PG_VERSION") == 18 ]] || fail 'PGDATA belongs to another PostgreSQL major version'
+    [[ $(<"$PGDATA/PG_VERSION") == 17 ]] || fail 'PGDATA must belong to PostgreSQL 17; automatic major-version conversion is refused'
   elif [[ -n $(find "$PGDATA" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
     fail 'refusing an unrecognized nonempty PGDATA directory'
   fi

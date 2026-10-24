@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-ARG POSTGRES_BASE_IMAGE=postgres:18.6-bookworm@sha256:3725f4e2499eef5134592b3b4ab79a543ed7f8e533b05b5b637af926630f6650
+ARG POSTGRES_BASE_IMAGE=postgres:17.11-bookworm@sha256:858bb5e98eed02eb8cafbcdc007f9a65d1b613972028944a8ec2133ccaf80d27
 FROM ${POSTGRES_BASE_IMAGE} AS dependencies
 USER root
 RUN apt-get update \
@@ -32,4 +32,4 @@ ENTRYPOINT ["/usr/local/bin/patroni-entrypoint"]
 CMD ["patroni", "/etc/one-postgres-ha/patroni.yml"]
 HEALTHCHECK --interval=10s --timeout=5s --start-period=120s CMD ["/usr/local/bin/patroni-healthcheck"]
 LABEL org.opencontainers.image.title="one-postgres-ha" \
-    org.opencontainers.image.description="PostgreSQL 18.6 with Patroni 4.1.5; non-root, file credentials, external etcd3"
+    org.opencontainers.image.description="PostgreSQL 17.11 with Patroni 4.1.5; non-root, file credentials, external etcd3"

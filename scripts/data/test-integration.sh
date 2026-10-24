@@ -9,8 +9,8 @@ prefix="ha-data-test-$RANDOM-$$"
 network=$prefix
 source_name="$prefix-source"
 target_name="$prefix-target"
-postgres18=$(sed -n 's/^POSTGRES_BASE_IMAGE=//p' "$repo/versions.lock")
-postgres17=${PG17_TEST_IMAGE:-postgres:17.11-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73}
+target_image=$(sed -n 's/^POSTGRES_BASE_IMAGE=//p' "$repo/versions.lock")
+source_image=${PG17_TEST_IMAGE:-postgres:17.11-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73}
 root="$repo/.local/data-tests/$prefix"
 mkdir -p -- "$root"
 cleanup() {
@@ -21,9 +21,9 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 docker network create "$network" >/dev/null
-docker run -d --name "$source_name" --network "$network" --env POSTGRES_HOST_AUTH_METHOD=trust "$postgres17" >/dev/null
+docker run -d --name "$source_name" --network "$network" --env POSTGRES_HOST_AUTH_METHOD=trust "$source_image" >/dev/null
 docker run -d --name "$target_name" --network "$network" --env POSTGRES_HOST_AUTH_METHOD=trust \
-  --mount "type=bind,src=$here/sql,dst=/sql,readonly" "$postgres18" >/dev/null
+  --mount "type=bind,src=$here/sql,dst=/sql,readonly" "$target_image" >/dev/null
 for name in "$source_name" "$target_name"; do
   ready=false
   for ((i = 0; i < 60; i++)); do
@@ -34,6 +34,11 @@ for name in "$source_name" "$target_name"; do
     sleep 1
   done
   [[ $ready = true ]]
+done
+for name in "$source_name" "$target_name"; do
+  [[ $(docker exec "$name" psql -X -qAt -U postgres -c 'SHOW server_version_num;') =~ ^17[0-9]{4}$ ]] || {
+    printf 'Integration fixtures must both run PostgreSQL17.\n' >&2; exit 1;
+  }
 done
 fixture_password=$(openssl rand -hex 24)
 docker exec -i "$source_name" psql -X -q --set ON_ERROR_STOP=1 -U postgres \
@@ -86,7 +91,7 @@ cmp "$root/source.roles.fingerprint" "$root/target.roles.fingerprint"
 [[ $(docker exec "$target_name" psql -X -qAt -U postgres -c "SELECT count(*) FROM pg_roles WHERE rolname='unrelated_other_database_role'") = 0 ]]
 
 printf '%s\n' "$fixture_password" >"$root/password"
-jq -n --arg cluster "$prefix" --arg path "$root/backups" --arg image "$postgres18" --arg target "$target_ip" \
+jq -n --arg cluster "$prefix" --arg path "$root/backups" --arg image "$target_image" --arg target "$target_ip" \
   --arg source "$source_ip" --arg password "$root/password" \
   '{cluster_name:$cluster,directory:$path,postgres_image:$image,target:{host:$target,port:5432,user:"postgres",password_file:$password},
   migrations:{one_minihouse:{source:{host:$source,port:5432,user:"postgres",password_file:$password,database:"one_minihouse"},
@@ -115,9 +120,9 @@ if bash "$here/data.sh" rollback one_minihouse >"$root/refused-rollback.txt" 2>&
 fi
 [[ $(docker exec "$source_name" psql -X -qAt -U postgres -c "SELECT datconnlimit FROM pg_database WHERE datname='one_minihouse'") = 0 ]]
 jq -n --arg at "$(date -u +%FT%TZ)" \
-  --arg source_image "$postgres17" --arg target_image "$postgres18" \
+  --arg source_image "$source_image" --arg target_image "$target_image" \
   --arg script_sha256 "$(sha256sum "$here/data.sh" | cut -d' ' -f1)" \
-  '{passed:true,pg17_to18:true,selected_roles:true,password_hashes:true,memberships:true,acl_rls_sequences:true,
+  '{passed:true,pg17_to17:true,selected_roles:true,password_hashes:true,memberships:true,acl_rls_sequences:true,
   freeze:true,other_database_unaffected:true,backup_restore:true,stale_rollback_refused:true,completed_at:$at,
   source_image:$source_image,target_image:$target_image,script_sha256:$script_sha256}' >"$root/result.json"
 printf 'DATA_INTEGRATION_PASSED: %s\n' "$root/result.json"

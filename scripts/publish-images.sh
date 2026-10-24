@@ -42,6 +42,7 @@ while IFS='=' read -r key value; do
 done < <(git -C "$ROOT" show "$COMMIT:versions.lock")
 [[ $POSTGRES_VERSION =~ ^[0-9]+\.[0-9]+$ && $PATRONI_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'Invalid committed runtime versions'
 [[ $POSTGRES_BASE_IMAGE =~ ^postgres:[a-zA-Z0-9_.-]+@sha256:[0-9a-f]{64}$ ]] || die 'Committed PostgreSQL base must be digest pinned'
+[[ $POSTGRES_BASE_IMAGE == "postgres:$POSTGRES_VERSION-bookworm@sha256:"* ]] || die 'Committed PostgreSQL base tag must match POSTGRES_VERSION and the bookworm variant'
 REV=${COMMIT:0:12}
 PG_IMAGE="$PREFIX/one-postgres-ha:pg$POSTGRES_VERSION-patroni$PATRONI_VERSION-$REV"
 TOOLS_IMAGE="$PREFIX/one-postgres-ha-tools:pg$POSTGRES_VERSION-$REV"
