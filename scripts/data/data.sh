@@ -323,10 +323,12 @@ isolated_restore() {
     db=$(basename -- "$file" .dump)
     safe_name "$db"
     header="$work/$db.archive-header"
-    docker run --rm --network none --read-only --cap-drop ALL \
-      --security-opt no-new-privileges --volume "$work:/backup:ro" \
-      --entrypoint pg_restore "$image" --list "/backup/$db.dump" >"$header" 2>"$header.error" ||
-      die 'archive cannot be inspected by PostgreSQL17 pg_restore; preserve it and use its matching major version'
+    # The host already verified this archive's checksum. Stream it so the
+    # capability-free client needs no access to the private backup directory.
+    docker run --rm -i --network none --read-only --cap-drop ALL \
+      --security-opt no-new-privileges --entrypoint pg_restore "$image" --list \
+      <"$file" >"$header" 2>"$header.error" ||
+      die 'archive could not be inspected with PostgreSQL17; inspect its private archive-header.error file'
     [[ $(grep -Ec '^;[[:space:]]+Dumped from database version: 17\.[0-9]{1,4}([[:space:]]|$)' "$header") == 1 &&
       $(grep -Ec '^;[[:space:]]+Dumped by pg_dump version: 17\.[0-9]+([[:space:]]|$)' "$header") == 1 ]] ||
       die 'archive must be exported from PostgreSQL17 by PostgreSQL17 pg_dump; PG18 archives and downgrades are unsupported'

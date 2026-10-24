@@ -35,6 +35,10 @@ printf 'docker %s\n' "$*" >>"$VERSION_LOG"
 if [[ ${!#} == --version ]]; then
   printf 'pg_dump (PostgreSQL) %s\n' "${CLIENT_VERSION:-17.11}"
 elif [[ " $* " == *' --list '* ]]; then
+  if [[ $1 == run ]]; then
+    [[ " $* " == *' -i '* && " $* " != *' --volume '* && ${!#} == --list ]] || exit 98
+    [[ $(cat) == 'fixture archive' ]] || exit 99
+  fi
   printf '; Dumped from database version: %s\n; Dumped by pg_dump version: %s\n' \
     "${ARCHIVE_SERVER:-17.10}" "${ARCHIVE_CLIENT:-17.11}"
 elif [[ $1 == exec && $3 == pg_restore ]]; then
