@@ -10,6 +10,20 @@ cp "$ROOT/images/postgres/source-profiles.sh" "$PROJECT/images/postgres/"
 SELECTOR="$PROJECT/scripts/download-sources.sh"
 CACHE="$PROJECT/.local/download-source"
 export SOURCES_FIXTURE="$WORK" SOURCES_MODE=normal
+# Tests use only synthetic fixture data. Preserve the original stderr descriptor
+# so failure diagnostics cannot append to a selector's redirected diagnostic file.
+exec 3>&2
+PHASE=setup
+report_failure() {
+  local status=$1 line=$2
+  printf 'FAIL: source selector phase=%s line=%s status=%s fixture_mode=%s\n' \
+    "$PHASE" "$line" "$status" "$SOURCES_MODE" >&3
+  if [[ -f "$WORK/diagnostic" ]]; then
+    printf '%s\n' 'Last synthetic selector diagnostic:' >&3
+    tail -n 12 "$WORK/diagnostic" >&3
+  fi
+}
+trap 'report_failure "$?" "$LINENO"' ERR
 cat >"$WORK/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -96,6 +110,7 @@ reject() {
 }
 
 # Read-only fallback and a blank menu neither build anything nor create private files.
+PHASE=readonly_defaults
 choose --show; expect official
 choose --resolve saved; expect official
 [[ ! -e "$PROJECT/.local" && ! -e "$WORK/calls" ]]
@@ -105,6 +120,7 @@ grep -Fq 'HTTPS' "$WORK/menu"
 grep -Fq '官方源' "$WORK/menu"
 
 # Manual selection and later resolves use one data line and never contact the network.
+PHASE=manual_selection
 choose --resolve tuna; expect tuna
 [[ $(<"$CACHE") == tuna && $(stat -c %a "$CACHE") == 600 && ! -e "$WORK/calls" ]]
 choose --resolve auto; expect tuna
@@ -115,6 +131,7 @@ choose official; expect official
 [[ ! -e "$WORK/calls" ]]
 
 # Explicit auto always remeasures; complete HTTPS metadata determines the winner.
+PHASE=initial_auto_selection
 choose auto; expect ustc
 [[ $(<"$CACHE") == ustc && $(wc -l <"$WORK/calls") == 36 ]]
 grep -Fq 'median' "$WORK/diagnostic"
@@ -123,10 +140,12 @@ choose --resolve auto; expect ustc
 [[ $(wc -l <"$WORK/calls") == "$before" ]]
 
 # An outlier in one round does not defeat the faster median candidate.
+PHASE=median_outlier
 reset_probe
 SOURCES_MODE=median choose auto; expect official
 [[ $(<"$CACHE") == official ]]
 for mode in official_unreachable wrong_release wrong_pypi wrong_status malformed_time oversized_body; do
+  PHASE=invalid_probe_$mode
   reset_probe
   SOURCES_MODE=$mode choose auto
   case "$mode" in
@@ -137,6 +156,7 @@ done
 
 # Failed or insufficient probes preserve the previous selection, without treating
 # an HTTP 200 error page as a working package mirror.
+PHASE=failed_probes_preserve_cache
 choose ustc
 reset_probe
 SOURCES_MODE=all_fail reject auto
@@ -144,12 +164,14 @@ SOURCES_MODE=all_fail reject auto
 SOURCES_MODE=one_success reject auto
 [[ $(<"$CACHE") == ustc ]]
 reset_probe
+PHASE=two_successful_rounds
 SOURCES_MODE=two_success choose auto; expect official
 rm -- "$CACHE"
 SOURCES_MODE=all_fail reject --resolve auto
 [[ ! -e $CACHE ]]
 
 # Cache content and command arguments are never evaluated.
+PHASE=malformed_cache
 reset_probe
 printf '$(touch injected)\n' >"$CACHE"
 reject --resolve saved
@@ -165,11 +187,13 @@ reject --resolve saved
 printf 'ustc\000' >"$CACHE"
 reject --resolve saved
 choose tuna; expect tuna
+PHASE=invalid_arguments
 for bad in 'unknown' '$(touch injected)' 'ustc;touch injected' '--apply' ''; do
   reject "$bad"
 done
 [[ ! -e "$PROJECT/injected" && ! -e "$WORK/calls" ]]
 rm -- "$CACHE"
+PHASE=linked_cache
 printf 'official\n' >"$WORK/outside"
 ln -s "$WORK/outside" "$CACHE"
 reject --show
@@ -181,17 +205,20 @@ ln "$WORK/outside" "$CACHE"
 reject official
 rm -- "$CACHE"
 mv -- "$PROJECT/.local" "$PROJECT/private-saved"
+PHASE=linked_private_directory
 ln -s "$PROJECT/private-saved" "$PROJECT/.local"
 reject --show
 reject official
 rm -- "$PROJECT/.local"
 mv -- "$PROJECT/private-saved" "$PROJECT/.local"
 rm -- "$PROJECT/.local/download-source.lock"
+PHASE=linked_lock
 ln -s "$WORK/outside" "$PROJECT/.local/download-source.lock"
 reject official
 rm -- "$PROJECT/.local/download-source.lock"
 
 # Concurrent writers publish complete valid files; readers never see partial data.
+PHASE=concurrent_cli_writers
 choose official
 pids=()
 for profile in official ustc tuna official ustc tuna official ustc tuna; do
@@ -213,6 +240,7 @@ for pid in "${pids[@]}"; do wait "$pid"; done
   writer=''
   trap '[[ -z $writer ]] || { kill "$writer" 2>/dev/null || true; wait "$writer" 2>/dev/null || true; }' EXIT
   for ((round=0; round<3; round++)); do
+    PHASE=atomic_cache_readers_round_$round
     (
       umask 077
       for ((replacement=0; replacement<300; replacement++)); do
