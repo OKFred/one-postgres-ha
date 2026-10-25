@@ -176,13 +176,25 @@
   when: pg_ha_udev.changed
   changed_when: true
 
+- name: Read the installed Keepalived status and version without refreshing APT
+  ansible.builtin.command:
+    argv: [dpkg-query, --show, '--showformat=${db:Status-Status}\n${Version}', keepalived]
+    expand_argument_vars: false
+  register: pg_ha_keepalived_installed
+  changed_when: false
+  failed_when: pg_ha_keepalived_installed.rc not in [0, 1]
+  check_mode: false
+  when: inventory_hostname in groups.core_nodes
+
 - name: Install the pinned Keepalived package
   ansible.builtin.apt:
     name: "keepalived={{ keepalived_package_version }}"
     state: present
     update_cache: true
     policy_rc_d: 101
-  when: inventory_hostname in groups.core_nodes
+  when:
+    - inventory_hostname in groups.core_nodes
+    - pg_ha_keepalived_installed.stdout_lines | default([]) != ['installed', keepalived_package_version]
   register: pg_ha_keepalived_package
 
 - name: Install and apply the firewall startup gate

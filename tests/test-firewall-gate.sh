@@ -113,7 +113,14 @@ for task in tasks:
 prepare = yaml.safe_load((root/'ansible/roles/cluster/tasks/prepare.yml').read_text())
 selected = []
 for task in prepare:
-    if task['name'] == 'Install the pinned Keepalived package':
+    if task['name'] == 'Read the installed Keepalived status and version without refreshing APT':
+        task = copy.deepcopy(task)
+        command = task['ansible.builtin.command']
+        assert command['argv'] == ['dpkg-query', '--show', '--showformat=${db:Status-Status}\\n${Version}', 'keepalived']
+        assert command['expand_argument_vars'] is False and task['check_mode'] is False
+        command['argv'][0] = str(tools/'query-keepalived')
+        selected.append(task)
+    elif task['name'] == 'Install the pinned Keepalived package':
         task = copy.deepcopy(task)
         package = task.pop('ansible.builtin.apt')
         assert package['state'] == 'present' and package['update_cache'] is True
@@ -123,7 +130,7 @@ for task in prepare:
         selected.append(task)
     elif task['name'] == 'Install and apply the firewall startup gate':
         selected.append(copy.deepcopy(task))
-assert len(selected) == 2
+assert len(selected) == 3
 (role/'tasks/prepare-core.yml').write_text(yaml.safe_dump(selected, sort_keys=False))
 (role/'tasks/main.yml').write_text(yaml.safe_dump([
     dict(name='Exercise the actual preparation sequence for a core node',
@@ -132,6 +139,20 @@ assert len(selected) == 2
     dict(name='Exercise the standalone firewall tasks',
          **{'ansible.builtin.include_tasks': 'firewall.yml'},
          when='not fixture_prepare | default(false) or fixture_firewall_only | default(false)')], sort_keys=False))
+query = tools/'query-keepalived'
+query.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ['HA_FIREWALL_FIXTURE'])
+state = json.loads((root/'state.json').read_text())
+assert sys.argv[1:] == ['--show', '--showformat=${db:Status-Status}\\\\n${Version}', 'keepalived']
+with (root/'calls').open('a') as calls:
+    calls.write('query keepalived\\n')
+if state.get('query_failure'): raise SystemExit(2)
+if not state['keepalived_installed']: raise SystemExit(1)
+print(state.get('keepalived_status', 'installed'))
+print(state.get('keepalived_version', '1:2.3.3-1'))
+''')
+query.chmod(0o755)
 installer = tools/'install-keepalived'
 installer.write_text('''#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -139,10 +160,11 @@ root = pathlib.Path(os.environ['HA_FIREWALL_FIXTURE'])
 statefile = root/'state.json'
 state = json.loads(statefile.read_text())
 assert sys.argv[1:] == ['keepalived=1:2.3.3-1', '101'], 'Package installation must suppress automatic startup'
-changed = not state['keepalived_installed']
+changed = (not state['keepalived_installed'] or state.get('keepalived_status', 'installed') != 'installed'
+           or state.get('keepalived_version', '1:2.3.3-1') != '1:2.3.3-1')
 with (root/'calls').open('a') as calls:
     calls.write('package keepalived policy_rc_d=101 changed='+str(changed).lower()+'\\n')
-state['keepalived_installed'] = True
+state.update(keepalived_installed=True, keepalived_status='installed', keepalived_version='1:2.3.3-1')
 statefile.write_text(json.dumps(state))
 print('installed' if changed else 'present')
 ''')
@@ -187,7 +209,8 @@ statefile.write_text(json.dumps(state))
 ''')
 stub.chmod(0o755)
 cases = ['core', 'replica', 'legacy', 'bad_unit', 'bad_gate', 'linked_gate', 'linked_directory',
-         'apply_failure', 'reset_dependencies', 'fresh_core', 'retry_core']
+         'apply_failure', 'reset_dependencies', 'fresh_core', 'retry_core',
+         'installed_core', 'different_version_core', 'unpacked_core', 'query_failure_core']
 core_hosts, replica_hosts = {}, {}
 dependency = (root/'ansible/roles/cluster/templates/firewall-dependency.conf.j2').read_text()
 for index, name in enumerate(cases):
@@ -213,10 +236,15 @@ for index, name in enumerate(cases):
         (system/'systemd/system/keepalived.service.d').symlink_to(scenario/'foreign')
     (scenario/'state.json').write_text(json.dumps(dict(active=name == 'legacy', enabled=name == 'legacy',
         fail_apply=name == 'apply_failure', reset_dependencies=name == 'reset_dependencies',
-        keepalived_installed=name != 'fresh_core', keepalived_loaded=name != 'fresh_core')))
+        keepalived_installed=name != 'fresh_core', keepalived_loaded=name != 'fresh_core',
+        keepalived_version='1:2.3.2-1' if name == 'different_version_core' else '1:2.3.3-1',
+        keepalived_status='unpacked' if name == 'unpacked_core' else 'installed',
+        query_failure=name == 'query_failure_core')))
     values = dict(ansible_connection='local', ansible_python_interpreter=sys.executable,
         deployment_root=str(deployment), fixture_system=str(system), fixture_dir=str(scenario), node_ip='192.0.2.'+str(index+10),
-        fixture_prepare=name in ['fresh_core', 'retry_core'], keepalived_package_version='1:2.3.3-1')
+        fixture_prepare=name in ['fresh_core', 'retry_core', 'installed_core', 'different_version_core',
+                                'unpacked_core', 'query_failure_core', 'replica'],
+        keepalived_package_version='1:2.3.3-1')
     (replica_hosts if name == 'replica' else core_hosts)[name] = values
 inventory = dict(all=dict(children=dict(core_nodes=dict(hosts=core_hosts),
     pg_nodes=dict(children=dict(core_nodes={}, replica_nodes=dict(hosts=replica_hosts))))))
@@ -251,12 +279,12 @@ state.update(keepalived_installed=False, keepalived_loaded=False)
 statefile.write_text(json.dumps(state))
 (scenario/'calls').write_text('')
 PY
-for scenario in core replica legacy fresh_core retry_core; do
+for scenario in core replica legacy fresh_core retry_core installed_core different_version_core unpacked_core; do
   if ! run_case "$scenario" >"$WORK/$scenario/result.log"; then cat "$WORK/$scenario/result.log" >&2; exit 1; fi
   if ! run_case "$scenario" >"$WORK/$scenario/repeat.log"; then cat "$WORK/$scenario/repeat.log" >&2; exit 1; fi
   grep -q 'changed=0' "$WORK/$scenario/repeat.log"
 done
-for scenario in apply_failure reset_dependencies; do
+for scenario in apply_failure reset_dependencies query_failure_core; do
   if run_case "$scenario" >"$WORK/$scenario/result.log" 2>&1; then
     echo "A failed firewall gate was accepted: $scenario" >&2
     exit 1
@@ -265,7 +293,8 @@ done
 python3 - "$WORK" <<'PY'
 import pathlib, sys
 work = pathlib.Path(sys.argv[1])
-for name in ['core', 'replica', 'legacy', 'fresh_core', 'retry_core']:
+for name in ['core', 'replica', 'legacy', 'fresh_core', 'retry_core',
+             'installed_core', 'different_version_core', 'unpacked_core']:
     scenario = work/name
     calls = (scenario/'calls').read_text().splitlines()
     action = 'reload' if name == 'legacy' else 'start'
@@ -279,9 +308,22 @@ for name in ['core', 'replica', 'legacy', 'fresh_core', 'retry_core']:
     if name in ['fresh_core', 'retry_core']:
         assert calls.index('package keepalived policy_rc_d=101 changed=true') < calls.index('daemon-reload')
         assert calls.count('daemon-reload') == 1, 'Repeated preparation must not reload unchanged service units'
-        assert calls.count('package keepalived policy_rc_d=101 changed=false') == 1
+        assert calls.count('query keepalived') == 2
+        assert len([line for line in calls if line.startswith('package keepalived')]) == 1
+    if name == 'installed_core':
+        assert calls.count('query keepalived') == 2
+        assert not any(line.startswith('package keepalived') for line in calls), 'An installed pin must not refresh APT'
+    if name in ['different_version_core', 'unpacked_core']:
+        assert calls.count('query keepalived') == 2
+        assert len([line for line in calls if line.startswith('package keepalived')]) == 1
+        assert calls.index('package keepalived policy_rc_d=101 changed=true') < calls.index('daemon-reload')
+    if name == 'replica':
+        assert not any(line.startswith(('query ', 'package ')) for line in calls)
+assert (work/'query_failure_core/calls').read_text().splitlines() == ['query keepalived']
+assert not (work/'query_failure_core/deployment/bin/firewall.sh').exists()
 assert 'fixture firewall failed' in (work/'apply_failure/result.log').read_text()
 assert 'does not require the startup firewall' in (work/'reset_dependencies/result.log').read_text()
 PY
 printf 'PASS: firewall gates preserve existing drop-ins, migrate legacy units without restart, reject unowned paths, and verify loaded dependencies\n'
 printf 'PASS: fresh core preparation installs the stopped Keepalived unit before checking its gate; partial retries reload new units; repeated preparation avoids restarts\n'
+printf 'PASS: the exact installed Keepalived pin avoids APT; missing, different and unpacked versions install; query errors fail closed and replicas skip package work\n'
