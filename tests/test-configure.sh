@@ -30,7 +30,7 @@ cat >"$WORK/bin/ssh" <<'MOCK'
 import json, os, sys
 args = sys.argv[1:]
 host = next(value.rsplit('@', 1)[-1] for value in args
-            if value.rsplit('@', 1)[-1] in ('192.0.2.11', '192.0.2.12', '192.0.2.13'))
+            if value.rsplit('@', 1)[-1].startswith('192.0.2.'))
 helper = sys.stdin.read()
 with open(os.environ['FIXTURE_CALLS'], 'a') as log:
     log.write(json.dumps({'tool': 'ssh', 'argv': args, 'helper': helper}) + '\n')
@@ -74,6 +74,15 @@ elif mode == 'inconsistent-version' and host == '192.0.2.13':
     probe['keepalived_version'] = '1:2.2.8-1'
 elif mode == 'different-controller' and host == '192.0.2.13':
     probe['controller_ip'] = '192.0.2.6'
+elif host == '192.0.2.14':
+    if mode == 'extra-mixed-architecture':
+        probe['architecture'] = 'x86_64'
+    elif mode == 'extra-unknown-architecture':
+        probe['architecture'] = 'riscv64'
+    elif mode == 'extra-missing-watchdog':
+        probe['watchdog'] = False
+    elif mode == 'extra-existing-data':
+        probe['mounts'][0]['data_exists'] = True
 print(json.dumps(probe))
 MOCK
 cat >"$WORK/bin/sshpass" <<'MOCK'
@@ -115,8 +124,27 @@ new_case() {
 }
 
 write_inputs() {
-  printf '%s\n' 192.0.2.11 "${NODE_TWO:-192.0.2.12}" 192.0.2.13 \
-    "${VIP:-192.0.2.20}" '' "${TRUST:-VERIFY}" >"$CASE/input"
+  local number count=${NODE_COUNT:-3}
+  printf '%s\n' 192.0.2.11 "${NODE_TWO:-192.0.2.12}" 192.0.2.13 >"$CASE/input"
+  if [[ ${OPTIONAL_NODE_INPUTS+x} ]]; then
+    printf '%s' "$OPTIONAL_NODE_INPUTS" >>"$CASE/input"
+  else
+    for ((number=4; number<=count; number++)); do
+      if ((number == 4)); then
+        printf '%s\n' "${NODE_FOUR:-192.0.2.14}" >>"$CASE/input"
+      else
+        printf '192.0.2.%s\n' "$((number + 10))" >>"$CASE/input"
+      fi
+    done
+    printf '\nyes\n' >>"$CASE/input"
+  fi
+  if [[ ${ETCD_INPUTS+x} ]]; then
+    printf '%s' "$ETCD_INPUTS" >>"$CASE/input"
+  else
+    printf '%s\n' "${ETCD_SELECTION:-}" "${ETCD_CONFIRM:-}" >>"$CASE/input"
+    if [[ ${FORCE_ETCD+x} ]]; then printf '%s\n' "$FORCE_ETCD" >>"$CASE/input"; fi
+  fi
+  printf '%s\n' "${VIP:-192.0.2.20}" '' "${TRUST:-VERIFY}" >>"$CASE/input"
   if [[ -z ${HA_CONFIGURE_KEY_PATH:-} ]]; then
     printf '%s\n' "$FIXTURE_PASSWORD" "${PASSWORD_CONFIRM:-$FIXTURE_PASSWORD}" >>"$CASE/input"
   fi
@@ -126,6 +154,55 @@ write_inputs() {
 
 run_wizard() {
   bash "$PROJECT/scripts/configure.sh" <"$CASE/input" >"$CASE/output" 2>&1
+}
+
+expect_success() {
+  run_wizard || { cat "$CASE/output" >&2; exit 1; }
+}
+
+assert_no_tool_call() {
+  if grep -Fq "\"tool\": \"$1\"" "$FIXTURE_CALLS"; then
+    printf 'Unexpected %s call before configuration was accepted\n' "$1" >&2
+    exit 1
+  fi
+}
+
+assert_membership() {
+  python3 - "$PROJECT" "$FIXTURE_CALLS" "$CASE/output" "$FIXTURE_PASSWORD" "$1" "$2" "$3" <<'PY'
+import json, pathlib, sys, yaml
+root, calls, output = map(pathlib.Path, sys.argv[1:4])
+password, count, core_indices, forced = sys.argv[4], int(sys.argv[5]), sys.argv[6], sys.argv[7] == 'true'
+expected_core = {f'armbian-{int(index):02d}' for index in core_indices.split(',')}
+expected_names = {f'armbian-{index:02d}' for index in range(1, count + 1)}
+expected_ips = {f'192.0.2.{index + 10}' for index in range(1, count + 1)}
+private = root / '.local'
+inventory = yaml.safe_load((private / 'inventory.yml').read_text())
+groups = inventory['all']['children']['pg_nodes']['children']
+core, replicas = groups['core_nodes']['hosts'], groups['replica_nodes']['hosts'] or {}
+assert set(core) == expected_core, (set(core), expected_core)
+assert set(replicas) == expected_names - expected_core, (set(replicas), expected_names - expected_core)
+assert not set(core) & set(replicas)
+nodes = dict(core, **replicas)
+assert len(nodes) == count
+assert {node['node_ip'] for node in nodes.values()} == expected_ips
+for index in range(1, count + 1):
+    name = f'armbian-{index:02d}'
+    assert nodes[name]['node_name'] == name
+    assert nodes[name]['ansible_host'] == f'192.0.2.{index + 10}'
+    assert nodes[name]['data_mount'] == '/mnt/ssd'
+    assert nodes[name]['data_root'] == '/mnt/ssd/one-postgres-ha'
+assert inventory['all']['vars'].get('etcd_nonstandard_members_confirmed', False) is forced
+assert {line.split()[0] for line in (private / 'known_hosts').read_text().splitlines()} == expected_ips
+records = [json.loads(line) for line in calls.read_text().splitlines()]
+assert len([record for record in records if record['tool'] == 'ssh']) == count
+assert len([record for record in records if record['tool'] == 'ssh-keyscan']) == count
+assert output.read_text().count('SHA256:') == count
+quorum = len(expected_core) // 2 + 1
+assert f'Quorum -- 最少存活：{quorum}' in output.read_text()
+assert f'Failure tolerance -- 可容忍成员故障：{len(expected_core) - quorum}' in output.read_text()
+assert password not in output.read_text() and password not in calls.read_text()
+assert not list(private.glob('configure.*'))
+PY
 }
 
 expect_failure() {
@@ -158,8 +235,8 @@ PY
 new_case
 TRUST=NO write_inputs
 expect_failure
-! grep -Fq '"tool": "ssh"' "$FIXTURE_CALLS"
-! grep -Fq '"tool": "sshpass"' "$FIXTURE_CALLS"
+assert_no_tool_call ssh
+assert_no_tool_call sshpass
 
 # Bad addresses are rejected before host trust or SSH authentication.
 for invalid in duplicate malformed vip-on-node; do
@@ -173,27 +250,64 @@ for invalid in duplicate malformed vip-on-node; do
   [[ ! -s "$FIXTURE_CALLS" ]]
 done
 
+# Optional addresses obey the same validation and cannot collide with the VIP.
+for invalid in duplicate-extra malformed-extra vip-on-extra; do
+  new_case
+  case "$invalid" in
+    duplicate-extra) NODE_COUNT=4 NODE_FOUR=192.0.2.13 write_inputs ;;
+    malformed-extra) NODE_COUNT=4 NODE_FOUR=999.0.2.14 write_inputs ;;
+    vip-on-extra) NODE_COUNT=4 VIP=192.0.2.14 write_inputs ;;
+  esac
+  expect_failure
+  [[ ! -s "$FIXTURE_CALLS" ]]
+done
+
+# Bad voter selections and incomplete override confirmation fail before SSH.
+for selection in '1 2' '1 2 2' '1 2 6' '0 1 2' '1 two 3' '1;2;3'; do
+  new_case
+  NODE_COUNT=5 ETCD_SELECTION="$selection" write_inputs
+  expect_failure
+  [[ ! -s "$FIXTURE_CALLS" ]]
+done
+for token in '' FORCE force-etcd; do
+  new_case
+  NODE_COUNT=4 ETCD_SELECTION='1 2 3 4' FORCE_ETCD="$token" write_inputs
+  expect_failure
+  [[ ! -s "$FIXTURE_CALLS" ]]
+done
+
 new_case
 export FIXTURE_SCAN_FAIL=192.0.2.12
 write_inputs
 expect_failure
-! grep -Fq '"tool": "ssh"' "$FIXTURE_CALLS"
+assert_no_tool_call ssh
 
 new_case
 export FIXTURE_SCAN_BAD=192.0.2.12
 write_inputs
 expect_failure
-! grep -Fq '"tool": "ssh"' "$FIXTURE_CALLS"
+assert_no_tool_call ssh
 
 new_case
 PASSWORD_CONFIRM='different fixture password' write_inputs
 expect_failure
-! grep -Fq '"tool": "ssh"' "$FIXTURE_CALLS"
+assert_no_tool_call ssh
 
 new_case
 export FIXTURE_SSH_FAIL=192.0.2.13
 write_inputs
 expect_failure
+
+for failure in scan ssh; do
+  new_case
+  if [[ $failure == scan ]]; then
+    export FIXTURE_SCAN_FAIL=192.0.2.14
+  else
+    export FIXTURE_SSH_FAIL=192.0.2.14
+  fi
+  NODE_COUNT=4 write_inputs
+  expect_failure
+done
 
 # An incomplete or unsuitable inspection must never publish a deployable input.
 for mode in malformed wrong-types mixed-architecture unknown-architecture occupied-vip missing-watchdog readonly-mount existing-data insufficient-space existing-deployment missing-compose inconsistent-version different-controller; do
@@ -205,6 +319,13 @@ for mode in malformed wrong-types mixed-architecture unknown-architecture occupi
     mixed-architecture) grep -Fq 'mixed ARM64 and AMD64 clusters are unsupported' "$CASE/output" ;;
     unknown-architecture) grep -Fq 'Initial setup requires ARM64 (aarch64) or AMD64 (x86_64) nodes' "$CASE/output" ;;
   esac
+done
+
+for mode in extra-mixed-architecture extra-unknown-architecture extra-missing-watchdog extra-existing-data; do
+  new_case
+  export FIXTURE_PROBE_MODE="$mode"
+  NODE_COUNT=4 write_inputs
+  expect_failure
 done
 
 for rejection in unsafe-path reservation unsafe-client unsigned-image cancelled; do
@@ -296,6 +417,57 @@ assert (private / 'secrets/ssh-password').is_file()
 assert not list(private.glob('configure.*'))
 PY
 
+# Adding replicas preserves the recommended odd voter count up to seven. Every
+# address still receives the same trust check and read-only remote inspection.
+for count in 4 5 6 8 10; do
+  new_case
+  NODE_COUNT="$count" VIP=192.0.2.200 write_inputs
+  expect_success
+  case "$count" in
+    4) members=1,2,3 ;;
+    5|6) members=1,2,3,4,5 ;;
+    8|10) members=1,2,3,4,5,6,7 ;;
+  esac
+  assert_membership "$count" "$members" false
+done
+
+# Operators can choose a different three-node voting cohort. Commas, spaces and
+# reordered input are normalized without dropping any PostgreSQL replicas.
+new_case
+NODE_COUNT=5 ETCD_SELECTION='05, 02, 03' write_inputs
+expect_success
+assert_membership 5 2,3,5 false
+
+# An even cohort and a cohort larger than seven both require the exact override.
+for count in 4 8; do
+  new_case
+  if [[ $count == 4 ]]; then members='1 2 3 4'; else members='1 2 3 4 5 6 7 8'; fi
+  NODE_COUNT="$count" ETCD_SELECTION="$members" FORCE_ETCD=FORCE-ETCD write_inputs
+  expect_success
+  assert_membership "$count" "${members// /,}" true
+done
+
+# A blank optional address does not stop collection without explicit consent.
+# Both 'no' and the blank/default response resume the very same node index.
+for decline in no ''; do
+  new_case
+  printf -v optional '\n%s\n192.0.2.14\n\nyes\n' "$decline"
+  OPTIONAL_NODE_INPUTS="$optional" write_inputs
+  expect_success
+  assert_membership 4 1,2,3 false
+done
+
+new_case
+OPTIONAL_NODE_INPUTS=$'\ny\n' write_inputs
+expect_success
+assert_membership 3 1,2,3 false
+
+# Declining the proposed membership returns to selection before host inspection.
+new_case
+NODE_COUNT=5 ETCD_INPUTS=$'\nno\n2,3,5\nyes\n' write_inputs
+expect_success
+assert_membership 5 2,3,5 false
+
 # Reject linked private state without altering the directory it points to.
 new_case
 mkdir "$CASE/external"
@@ -376,4 +548,4 @@ assert not list(root.glob('.local/tool.*')), 'Finished controller retained its l
 assert not (root / '.local/inventory.yml').exists(), 'Routing created an inventory without running the wizard'
 PY
 
-echo 'PASS: configure ARM64/AMD64 detection, mixed/unknown architecture rejection, trust gating, atomic output, secret handling and no-overwrite'
+echo 'PASS: configure optional nodes, recommended/forced etcd voters, ARM64/AMD64 detection, trust gating, atomic output, secret handling and no-overwrite'

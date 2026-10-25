@@ -20,26 +20,36 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 usage() {
-  printf '%s\n' 'Usage: bash ops.sh sources [auto|official|ustc|tuna|--show]' \
+  printf '%s\n' 'Usage: bash ops.sh sources [auto|official|ustc|tuna|clear|--show]' \
     'No argument opens the menu; Enter exits -- 无参数显示菜单，直接回车退出。' \
     'auto remeasures verified HTTPS endpoints; manual choices do not contact the network -- auto 重新测速，手动选择不联网。' \
-    'Saved choices are reused until explicitly changed -- 保存的选择会复用，直到手动修改或重新测速。'
+    'Saved choices are reused until changed or cleared -- 保存的选择会复用，直到修改或清除。' \
+    'clear removes the saved choice; select auto to measure again -- clear 清除已保存选择；运行 auto 可重新测速。'
 }
 check_private() {
   [[ ! -L "$ROOT/.local" && (! -e "$ROOT/.local" || -d "$ROOT/.local") ]] || die 'Invalid private directory -- 私有目录无效'
 }
 check_cache_file() {
+  local enforce_size=${1:-true}
   check_private
   [[ -f $CACHE && ! -L $CACHE ]] || die 'Invalid saved source file -- 保存的源文件无效'
   [[ $(stat -c %u -- "$CACHE") == "$(id -u)" && $(stat -c %h -- "$CACHE") == 1 \
-    && $(stat -c %s -- "$CACHE") -le 32 ]] || die 'Unsafe saved source file -- 保存的源文件不安全'
+    && ($enforce_size == false || $(stat -c %s -- "$CACHE") -le 32) ]] || die 'Unsafe saved source file -- 保存的源文件不安全'
 }
 read_cache() {
-  local snapshot cache_fd cache_object metadata cache_owner cache_links cache_size
+  local snapshot cache_fd cache_object metadata cache_owner cache_links cache_size attempt opened=false
   check_private
-  if [[ ! -e $CACHE && ! -L $CACHE ]]; then return 1; fi
-  [[ -f $CACHE && ! -L $CACHE ]] || die 'Invalid saved source file -- 保存的源文件无效'
-  exec {cache_fd}<"$CACHE" || die 'Cannot open saved source -- 无法打开已保存源'
+  # Clearing may unlink the path between lookup and open. Retry a changing
+  # path briefly; once opened, the existing snapshot checks remain authoritative.
+  for ((attempt=0; attempt<8; attempt++)); do
+    if [[ ! -e $CACHE && ! -L $CACHE ]]; then return 1; fi
+    [[ -f $CACHE && ! -L $CACHE ]] || continue
+    if { exec {cache_fd}<"$CACHE"; } 2>/dev/null; then opened=true; break; fi
+  done
+  if [[ $opened != true ]]; then
+    if [[ ! -e $CACHE && ! -L $CACHE ]]; then return 1; fi
+    die 'Cannot open a safe saved source -- 无法打开安全的已保存源'
+  fi
   cache_object="/proc/$BASHPID/fd/$cache_fd"
   # Linux /proc lets metadata checks and the bounded read share one held inode.
   # Atomic publication may unlink that inode after open (links=0); additional
@@ -62,7 +72,7 @@ read_cache() {
   esac
 }
 lock_cache() {
-  local lock="$ROOT/.local/download-source.lock"
+  local lock="$ROOT/.local/download-source.lock" enforce_size=${1:-true}
   check_private
   mkdir -p -- "$ROOT/.local"
   [[ ! -L $lock && (! -e $lock || -f $lock) ]] || die 'Invalid source lock -- 源配置锁无效'
@@ -73,7 +83,37 @@ lock_cache() {
   exec 9>>"$lock"
   chmod 0600 "$lock"
   flock -w 75 9 || die 'Another source selection is running -- 另一源选择任务正在运行'
-  if [[ -e $CACHE || -L $CACHE ]]; then check_cache_file; fi
+  if [[ -e $CACHE || -L $CACHE ]]; then check_cache_file "$enforce_size"; fi
+}
+clear_saved_source() {
+  local lock="$ROOT/.local/download-source.lock"
+  check_private
+  if [[ ! -e $CACHE && ! -L $CACHE && ! -e $lock && ! -L $lock ]]; then
+    printf 'No saved selection to clear -- 没有已保存的源选择。\n'
+    return 0
+  fi
+  # Wait for an initial probe even if its cache has not yet been published.
+  # Size/content do not matter for removal; type, owner and link guards do.
+  lock_cache false
+  if [[ -e $CACHE || -L $CACHE ]]; then
+    check_cache_file false
+    rm -- "$CACHE" || die 'Cannot clear saved selection -- 无法清除已保存选择'
+  fi
+  # Retain the lock inode so concurrent operations keep sharing the same lock.
+  printf 'Saved selection cleared; choose 1 to remeasure -- 已清除已保存选择；请选择 1 重新测速。\n'
+}
+show_selection() {
+  local current result
+  if current=$(read_cache && printf '%s\n' "$SAVED_SOURCE") 2>/dev/null; then
+    printf 'Saved selection -- 当前已保存源：%s\n' "$current" >&2
+  else
+    result=$?
+    if [[ $result == 1 ]]; then
+      printf 'No saved selection (default: official) -- 未保存源选择（默认：官方源）。\n' >&2
+    else
+      printf 'Saved selection is invalid or unreadable; clear or check permissions -- 已保存选择无效或不可读；可清除或检查文件权限。\n' >&2
+    fi
+  fi
 }
 save_cache() {
   local selected=$1
@@ -112,7 +152,7 @@ probe_endpoint() {
   printf '%s' "$milliseconds"
 }
 probe_candidate() {
-  local profile=$1 directory=$2 round endpoint total elapsed failed=0 score
+  local profile=$1 directory=$2 round endpoint total elapsed failed=0 attempted=0 score
   local -a rounds=() urls=() markers=(release release pypi release)
   # Worker exits must not run the parent's shared temporary-directory cleanup.
   trap - EXIT INT TERM
@@ -122,6 +162,7 @@ probe_candidate() {
     "${HA_PYPI_URL%/}/six/"
     "${HA_DOCKER_CE_URL%/}/linux/debian/dists/trixie/InRelease")
   for ((round=0; round<3; round++)); do
+    attempted=$((attempted + 1))
     total=0
     for endpoint in 0 1 2 3; do
       if elapsed=$(probe_endpoint "${urls[$endpoint]}" "${markers[$endpoint]}" "$directory/$profile-body"); then
@@ -140,13 +181,13 @@ probe_candidate() {
   done
   if [[ ${#rounds[@]} -ge 2 ]]; then
     score=$(printf '%s\n' "${rounds[@]}" | sort -n | awk '{a[NR]=$1} END {if (NR%2) print a[(NR+1)/2]; else printf "%.0f\n", (a[NR/2]+a[NR/2+1])/2}')
-    printf '%s %s %s\n' "$score" "$profile" "${#rounds[@]}" >"$directory/$profile-result"
+    printf '%s %s %s %s\n' "$score" "$profile" "${#rounds[@]}" "$attempted" >"$directory/$profile-result"
   else
-    printf 'unavailable %s 0\n' "$profile" >"$directory/$profile-result"
+    printf 'unavailable %s %s %s\n' "$profile" "${#rounds[@]}" "$attempted" >"$directory/$profile-result"
   fi
 }
 measure_sources() {
-  local profile pid score selected successes best='' best_score=''
+  local profile pid score selected successes attempted best='' best_score=''
   for tool in curl awk sort stat; do command -v "$tool" >/dev/null || die "Missing required tool -- 缺少工具：$tool"; done
   [[ -f "$ROOT/images/postgres/source-profiles.sh" && ! -L "$ROOT/images/postgres/source-profiles.sh" ]] || die 'Missing source profiles -- 缺少源配置定义'
   # Trusted project code; cached input is never sourced or evaluated.
@@ -159,18 +200,26 @@ measure_sources() {
   done
   for pid in "${PIDS[@]}"; do wait "$pid" || true; done
   PIDS=()
+  printf '\nHTTPS test results -- HTTPS 测速结果\n' >&2
+  printf '%-12s%-14s%-10s%s\n' Source Status Rounds 'median total (ms)' >&2
+  printf '来源        状态          成功/尝试 总耗时中位数(ms)\n' >&2
   for profile in official ustc tuna; do
     if [[ ! -f "$WORK/$profile-result" ]]; then
-      printf '%s: unavailable -- 不可用\n' "$profile" >&2; continue
+      printf '%-12s%-14s%-10s%s\n' "$profile" error - - >&2; continue
     fi
-    read -r score selected successes <"$WORK/$profile-result"
+    read -r score selected successes attempted <"$WORK/$profile-result"
+    [[ $selected == "$profile" && $successes =~ ^[0-3]$ && $attempted =~ ^[23]$ ]] || die 'Unexpected probe result -- 测速结果无效'
     if [[ $score == unavailable ]]; then
-      printf '%s: unavailable -- 不可用\n' "$profile" >&2; continue
+      [[ $successes =~ ^[01]$ ]] || die 'Unexpected probe result -- 测速结果无效'
+      printf '%-12s%-14s%-10s%s\n' "$profile" unavailable "$successes/$attempted" - >&2; continue
     fi
-    [[ $score =~ ^[0-9]+$ && $selected == "$profile" && $successes =~ ^[23]$ ]] || die 'Unexpected probe result -- 测速结果无效'
-    printf '%s: %s ms (median total; %s successful rounds) -- 中位总耗时，%s 轮成功\n' "$profile" "$score" "$successes" "$successes" >&2
+    [[ $score =~ ^[0-9]+$ && $successes =~ ^[23]$ && $attempted == 3 ]] || die 'Unexpected probe result -- 测速结果无效'
+    printf '%-12s%-14s%-10s%s\n' "$profile" available "$successes/$attempted" "$score" >&2
     if [[ -z $best || $score -lt $best_score ]]; then best=$profile; best_score=$score; fi
   done
+  printf '%s\n' 'available = 可用；unavailable = 不可用；error = 测试异常。' \
+    'Rounds = successful/attempted; 2 successes required -- 成功/实际尝试；至少成功 2 轮。' \
+    'Each round totals 4 HTTPS requests -- 每轮累计 4 项 HTTPS 请求的耗时。' >&2
   [[ -n $best ]] || die 'No usable HTTPS source; saved choice was not changed -- 没有可用 HTTPS 源，原选择未修改'
   SELECTED_SOURCE=$best
 }
@@ -188,10 +237,13 @@ select_source() {
 interactive() {
   local answer
   while true; do
-    printf '%s\n' '' 'Download sources -- 下载源' \
-      '1. Auto (HTTPS timing) -- 自动选择（HTTPS 测速）' \
+    printf '%s\n' '' 'Download sources -- 下载源' >&2
+    show_selection
+    printf '%s\n' \
+      '1. Remeasure and select (HTTPS) -- 重新测速并选择（HTTPS）' \
       '2. Official -- 官方源' '3. USTC -- 中科大源' '4. TUNA -- 清华源' \
-      '5. Show saved selection -- 显示已保存选择' '0. Back -- 返回' >&2
+      '5. Show saved selection -- 显示已保存选择' \
+      '6. Clear saved selection -- 清除已保存选择' '0. Back -- 返回' >&2
     printf 'Choose an option (Enter to exit) -- 请选择（直接回车退出）：' >&2
     IFS= read -r answer || return 0
     case "$answer" in
@@ -200,7 +252,8 @@ interactive() {
       2|02) select_source official false; return ;;
       3|03) select_source ustc false; return ;;
       4|04) select_source tuna false; return ;;
-      5|05) if read_cache; then printf '%s\n' "$SAVED_SOURCE"; else printf 'official\n'; fi ;;
+      5|05) show_selection ;;
+      6|06) clear_saved_source ;;
       *) printf 'Invalid option -- 选项无效\n' >&2 ;;
     esac
   done
@@ -210,6 +263,10 @@ case "${1:-}" in
   --show)
     [[ $# == 1 ]] || die 'Unexpected arguments -- 参数无效'
     if read_cache; then printf '%s\n' "$SAVED_SOURCE"; else printf 'official\n'; fi
+    ;;
+  clear)
+    [[ $# == 1 ]] || die 'Unexpected arguments -- 参数无效'
+    clear_saved_source
     ;;
   --resolve)
     [[ $# == 2 ]] || die '--resolve needs one source -- --resolve 需要一个源名称'

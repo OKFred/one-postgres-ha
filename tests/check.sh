@@ -26,6 +26,7 @@ bash tests/test-cli.sh
 bash tests/test-configure.sh
 python3 -B tests/test-configure-probe.py
 bash tests/test-architecture-preflight.sh
+bash tests/test-topology.sh
 bash tests/test-controller-settings.sh
 bash tests/test-download-sources.sh
 bash tests/test-package-sources.sh

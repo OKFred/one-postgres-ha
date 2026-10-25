@@ -14,7 +14,7 @@ Usage: bash ops.sh [--inventory FILE] COMMAND [ARGUMENTS]
   install [--plan|--apply]
   uninstall [--plan|--apply] [--keep-data|--purge-data] [--confirm TOKEN]
   package
-  sources [auto|official|ustc|tuna|--show]
+  sources [auto|official|ustc|tuna|clear|--show]
 
 Inventory defaults to .local/inventory.yml. Windows: run through WSL.
 preflight/plan read the site; secrets prepares local credentials, never resets them.

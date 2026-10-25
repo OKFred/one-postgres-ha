@@ -4,7 +4,9 @@
 - name: Validate inventory invariants
   ansible.builtin.assert:
     that:
-      - groups.core_nodes | length == 3
+      - groups.core_nodes | length >= 3
+      - etcd_nonstandard_members_confirmed is boolean
+      - groups.core_nodes | length in [3, 5, 7] or etcd_nonstandard_members_confirmed | bool
       - groups.pg_nodes | length >= 3
       - groups.core_nodes | difference(groups.pg_nodes) | length == 0
       - postgres_port | int == 5433

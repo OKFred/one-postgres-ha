@@ -10,22 +10,31 @@
     cluster_action: inspect-start
   roles: [cluster]
 
-- name: Prepare all approved existing nodes
+- name: Refuse unfinished joins and unsafe new members before changing any node
   hosts: pg_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Established databases require the isolated add-node operation for new replicas
+      ansible.builtin.assert:
+        that: >-
+          inventory_hostname in groups.core_nodes or pg_ha_marker.stat.exists or
+          groups.pg_nodes | map('extract', hostvars, 'pg_ha_pg_version_stat')
+          | selectattr('stat.exists', 'equalto', true) | list | length == 0
+        fail_msg: An initialized cluster cannot enroll a fresh replica through deploy. Use add-node for this host.
+    - name: Pending additions must be completed with add-node
+      ansible.builtin.assert:
+        that: not pg_ha_pending_marker.stat.exists
+        fail_msg: A replica addition is pending; use add-node to finish it safely.
+
+- name: Prepare the etcd and proxy cohort before inspecting DCS
+  hosts: core_nodes
   gather_facts: false
   become: true
   any_errors_fatal: true
   vars:
     cluster_action: prepare
-  pre_tasks:
-    - name: New replicas must use the isolated add-node operation
-      ansible.builtin.assert:
-        that: inventory_hostname in groups.core_nodes or pg_ha_marker.stat.exists
-        fail_msg: Deploy does not enroll new replicas. Use add-node for this host.
-    - name: Pending additions must be completed with add-node
-      ansible.builtin.assert:
-        that: not pg_ha_pending_marker.stat.exists
-        fail_msg: A replica addition is pending; use add-node to finish it safely.
   roles: [cluster]
   post_tasks:
     - name: Prepare the configured application image
@@ -37,7 +46,7 @@
         name: cluster
         tasks_from: inspect-update
 
-- name: Start all three initial etcd members before waiting for quorum
+- name: Start every selected initial etcd member before waiting for quorum
   hosts: core_nodes
   gather_facts: false
   become: true
@@ -68,6 +77,29 @@
   vars:
     cluster_action: inspect-dcs
   roles: [cluster]
+
+- name: Prepare approved replicas after the DCS initialization decision
+  hosts: pg_nodes:!core_nodes
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    cluster_action: prepare
+  pre_tasks:
+    - name: Fresh replicas are allowed only for an uninitialized PostgreSQL cluster
+      ansible.builtin.assert:
+        that: hostvars[groups.core_nodes[0]].pg_ha_new_cluster or pg_ha_marker.stat.exists
+        fail_msg: Deploy does not enroll new replicas into an initialized DCS. Use add-node for this host.
+  roles: [cluster]
+  post_tasks:
+    - name: Prepare the configured replica application image
+      ansible.builtin.include_role:
+        name: cluster
+        tasks_from: prepare-image
+    - name: Inspect replica image and configuration reconciliation
+      ansible.builtin.include_role:
+        name: cluster
+        tasks_from: inspect-update
 
 - name: Inspect retained-data receipts on every PostgreSQL member
   hosts: pg_nodes
@@ -174,8 +206,8 @@
       delay: 2
       when: pg_ha_new_cluster
 
-- name: Build the initial replicas after primary bootstrap
-  hosts: "core_nodes:!{{ groups.get('core_nodes', ['__missing_core__'])[0] }}"
+- name: Build every initial standby after primary bootstrap
+  hosts: "pg_nodes:!{{ groups.get('core_nodes', ['__missing_core__'])[0] }}"
   serial: 1
   gather_facts: false
   become: true

@@ -37,6 +37,11 @@ args_include HA_DOWNLOAD_SOURCE=tuna
 HA_DOWNLOAD_SOURCE=official bash "$PROJECT/ops.sh" status
 args_include HA_DOWNLOAD_SOURCE=official
 [[ $(<"$PROJECT/.local/download-source") == tuna ]]
+: >"$SOURCE_WIRING_LOG"
+bash "$PROJECT/ops.sh" sources clear >"$WORK/cleared"
+[[ ! -e "$PROJECT/.local/download-source" && ! -s "$SOURCE_WIRING_LOG" ]]
+bash "$PROJECT/ops.sh" tools
+args_include DOWNLOAD_SOURCE=official
 for setting in '$(touch injected)' 'auto;touch injected' 'https://example.com'; do
   : >"$SOURCE_WIRING_LOG"
   if HA_DOWNLOAD_SOURCE="$setting" bash "$PROJECT/ops.sh" tools >"$WORK/rejected" 2>&1; then exit 1; fi

@@ -11,7 +11,9 @@
     - name: Require the full cluster inventory and an explicit cleanup mode
       ansible.builtin.assert:
         that:
-          - groups.core_nodes | length == 3
+          - groups.core_nodes | length >= 3
+          - (etcd_nonstandard_members_confirmed | default(false)) is boolean
+          - groups.core_nodes | length in [3, 5, 7] or etcd_nonstandard_members_confirmed | default(false) | bool
           - groups.core_nodes | difference(groups.pg_nodes) | length == 0
           - groups.pg_nodes | difference(ansible_play_hosts_all) | length == 0
           - ha_cleanup_apply | default(false) | string | lower in ['true', 'false']

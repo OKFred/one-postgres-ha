@@ -1,6 +1,6 @@
 # 镜像发布与拉取部署
 
-本项目继续使用三台独立 Docker Compose 节点，不需要 Docker Swarm。
+本项目使用至少三台独立 Docker Compose 节点，不需要 Docker Swarm。
 `install.sh` 通过工具容器运行 Ansible，负责跨节点准备、启动顺序和验收。
 单独 `docker compose up -d` 用于已经准备好的节点，不能替代宿主防火墙、watchdog 和 Keepalived 的首次配置。
 

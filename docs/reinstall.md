@@ -54,7 +54,7 @@ bash scripts/prepare-host.sh /实际SSD挂载点 --apply
 宿主准备拒绝接管未知 Docker 配置；磁盘分区、格式化、挂载和 watchdog 移交需先完成。
 安装脚本不猜测磁盘或网卡，也不把数据写入缺失 SSD 的普通目录。
 宿主准备自动识别本机的 `amd64` 或 `arm64` 软件包架构。配置向导通过 SSH 自动识别
-各节点的 `x86_64` 或 `aarch64`，要求三个核心节点及后续副本使用相同架构；
+各节点的 `x86_64` 或 `aarch64`，要求所有核心节点及后续副本使用相同架构；
 已有 ARM64 inventory 保持兼容。手写 AMD64 inventory 时设置 `expected_architecture: x86_64`，
 不能通过 `deployment_environment: test` 绕过架构或 watchdog 检查。
 
