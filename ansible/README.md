@@ -8,7 +8,7 @@
 - 首次准备Debian13 AMD64或ARM64宿主机，先显式运行`bash scripts/prepare-host.sh /实际SSD挂载点 --plan`，检查后使用`--apply`安装固定版本工具及配置Docker存储。该入口在目标宿主机执行并自动识别软件包架构。
 - SSD已有文件系统、已挂载且有足够余量。宿主准备和Ansible部署均不格式化磁盘、不挂载猜测设备、不接管未知非空目录。
 - 生产节点支持全AMD64（`x86_64`）或全ARM64（`aarch64`），核心节点及新增副本必须与`expected_architecture`一致。向导自动填写该值，旧inventory默认保留`aarch64`；不接受混合或未知架构，`deployment_environment: test`也不能绕过这些检查。
-- 三个核心节点在同一直接相连网络，VIP已在地址池预留，设置`vip_reserved: true`；所有节点名与inventory hostname保持一致。
+- 所有核心节点在同一直接相连网络，VIP已在地址池预留，设置`vip_reserved: true`；所有节点名与inventory hostname保持一致。
 - 核心节点配置精确的`keepalived_package_version`，例如先用`apt-cache policy keepalived`核实版本。未知现有Keepalived配置会被拒绝覆盖。
 - Watchdog是可用字符设备，无其他服务占用，systemd RuntimeWatchdog关闭。本轮只读检查不打开设备；实际整机重启保护必须现场验收。
 
@@ -16,7 +16,11 @@
 
 ## 配置与私有输入
 
-从`inventory.example.yml`复制到`.local/inventory.yml`。核心节点仅`core_nodes`三个；后续PG备库加入`replica_nodes`，同属`pg_nodes`。
+从`inventory.example.yml`复制到`.local/inventory.yml`。至少三个PG节点；`core_nodes`承载etcd、代理和VIP，
+其余PG备库放入`replica_nodes`，两组同属`pg_nodes`。首次部署可以同时初始化两组。
+默认选择不超过7台的最大奇数核心节点；手工配置偶数或超过7个核心节点须设置布尔值
+`etcd_nonstandard_members_confirmed: true`，向导会要求输入`FORCE-ETCD`后才保存此值。
+这不是在线etcd成员变更接口；运行中的成员不能只通过编辑分组来增减。新增PG副本仍使用`add-node`。
 
 每节点必填`node_name`、`node_ip`、`data_mount`、`data_root`、`network_interface`；全局配置`cluster_name`、VIP、`admin_cidrs`、`client_cidrs`。`data_root`必须在已挂载SSD内，不能通过符号链接逃逸。
 

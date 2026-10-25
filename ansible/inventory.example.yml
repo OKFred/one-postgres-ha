@@ -8,6 +8,9 @@ all:
     # Use aarch64 for all ARM64 nodes or x86_64 for all AMD64 nodes.
     # configure detects this value; mixed architectures are unsupported.
     expected_architecture: aarch64
+    # core_nodes are etcd voters and VIP/proxy hosts. Prefer 3, 5 or 7.
+    # Nonstandard counts require explicit consent; configure prompts FORCE-ETCD.
+    etcd_nonstandard_members_confirmed: false
     # source builds on each node; prebuilt pulls an immutable registry image.
     postgres_image_mode: source
     postgres_ha_image: ''

@@ -31,6 +31,27 @@ def username(value):
     return value
 
 
+def default_voters(count):
+    if count < 3:
+        fail("At least three PostgreSQL nodes are required")
+    size = min(count, 7)
+    if size % 2 == 0:
+        size -= 1
+    return list(range(1, size + 1))
+
+
+def voter_indices(count, value):
+    parts = re.split(r"[\s,]+", value.strip())
+    if not parts or any(not re.fullmatch(r"0*[1-9][0-9]*", part) for part in parts):
+        fail("Etcd voters must be node numbers separated by spaces or commas")
+    selected = [int(part) for part in parts]
+    if len(selected) < 3 or len(set(selected)) != len(selected):
+        fail("Choose at least three distinct etcd voting nodes")
+    if any(number > count for number in selected):
+        fail("An etcd voter refers to a node that was not entered")
+    return sorted(selected)
+
+
 def image(value, local=False):
     registry = r"[a-z0-9][a-z0-9.:_-]*/[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[a-f0-9]{64}"
     registry_host = value.split("/", 1)[0]
@@ -163,8 +184,16 @@ def check_fresh(root):
 
 
 def collect(stage, vip, user, ips):
-    if len(set(ips + [vip])) != 4:
-        fail("The three node addresses and VIP must be different")
+    ips = [ipv4(value) for value in ips]
+    vip = ipv4(vip)
+    if len(ips) < 3 or len(set(ips + [vip])) != len(ips) + 1:
+        fail("At least three distinct node addresses and a different VIP are required")
+    selection = (stage / "core-node-indices").read_text()
+    core_indices = voter_indices(len(ips), selection)
+    nonstandard = len(core_indices) % 2 == 0 or len(core_indices) > 7
+    confirmation = stage / "etcd-force-confirmation"
+    if nonstandard and (not confirmation.is_file() or confirmation.read_text() != "FORCE-ETCD\n"):
+        fail("An even or larger-than-seven etcd voting group requires explicit FORCE-ETCD confirmation")
     discoveries = []
     for index, expected in enumerate(ips, 1):
         entry = json.loads((stage / f"node{index}.json").read_text())
@@ -197,7 +226,7 @@ def collect(stage, vip, user, ips):
             fail("Invalid Keepalived package version")
         discoveries.append(entry)
     if len({entry["architecture"] for entry in discoveries}) != 1:
-        fail("All three nodes must use the same architecture; mixed ARM64 and AMD64 clusters are unsupported")
+        fail("All nodes must use the same architecture; mixed ARM64 and AMD64 clusters are unsupported")
     for field in ("prefix", "network", "controller_ip", "keepalived_version"):
         if len({entry[field] for entry in discoveries}) != 1:
             fail("Nodes disagree on " + field + "; configure manually")
@@ -213,7 +242,8 @@ def collect(stage, vip, user, ips):
         common = usable if common is None else common & usable
     if not common:
         fail("No common writable local SSD mount with at least 20 GiB free and no cluster data")
-    metadata = {"nodes": discoveries, "mounts": sorted(common), "vip": vip, "user": user}
+    metadata = {"nodes": discoveries, "mounts": sorted(common), "vip": vip, "user": user,
+                "core_indices": core_indices, "etcd_nonstandard_members_confirmed": nonstandard}
     (stage / "metadata.json").write_text(json.dumps(metadata))
     print("Detected node architecture:", discoveries[0]["architecture"], file=sys.stderr)
     print("Detected network:", discoveries[0]["network"], file=sys.stderr)
@@ -227,7 +257,7 @@ def render(stage, mount, cidr, postgres, tools, key_host):
 
     metadata = json.loads((stage / "metadata.json").read_text())
     if mount not in metadata["mounts"]:
-        fail("SSD mount was not qualified on all three nodes")
+        fail("SSD mount was not qualified on all nodes")
     client_network = ipaddress.IPv4Network(cidr, strict=True)
     client = str(client_network)
     if client == "0.0.0.0/0" or any(client_network.overlaps(ipaddress.IPv4Network(block)) for block in ("127.0.0.0/8", "224.0.0.0/4")):
@@ -244,18 +274,21 @@ def render(stage, mount, cidr, postgres, tools, key_host):
                  "postgres_image_mode": "prebuilt" if postgres else "source", "postgres_ha_image": postgres,
                  "vip_address": metadata["vip"], "vip_prefix": nodes[0]["prefix"], "vip_router_id": 51,
                  "vip_reserved": True, "keepalived_package_version": nodes[0]["keepalived_version"],
+                 "etcd_nonstandard_members_confirmed": metadata["etcd_nonstandard_members_confirmed"],
                  "admin_cidrs": [nodes[0]["controller_ip"] + "/32"], "client_cidrs": [client],
                  "minimum_data_free_gib": 20, "backup_target": {"enabled": False}}
     if not key_host:
         variables["ansible_password"] = "{{ lookup('ansible.builtin.file', private_dir + '/secrets/ssh-password') }}"
     hosts = {}
     for index, node in enumerate(nodes, 1):
-        name = f"armbian-0{index}"
+        name = f"armbian-{index:02d}"
         hosts[name] = {"ansible_host": node["node_ip"], "node_ip": node["node_ip"], "node_name": name,
                        "data_mount": mount, "data_root": mount.rstrip("/") + "/one-postgres-ha",
                        "network_interface": node["interface"]}
+    core_names = {f"armbian-{index:02d}" for index in metadata["core_indices"]}
     inventory = {"all": {"vars": variables, "children": {"pg_nodes": {"children": {
-        "core_nodes": {"hosts": hosts}, "replica_nodes": {"hosts": {}}}}}}}
+        "core_nodes": {"hosts": {name: host for name, host in hosts.items() if name in core_names}},
+        "replica_nodes": {"hosts": {name: host for name, host in hosts.items() if name not in core_names}}}}}}}
     (stage / "inventory.yml").write_text(yaml.safe_dump(inventory, sort_keys=False, allow_unicode=True))
     env = "HA_TOOLS_IMAGE=" + tools + "\n"
     if key_host:
@@ -309,6 +342,10 @@ def main():
         print(ipv4(*args))
     elif command == "user":
         print(username(*args))
+    elif command == "voters-default":
+        print(" ".join(map(str, default_voters(int(args[0])))))
+    elif command == "voters":
+        print(" ".join(map(str, voter_indices(int(args[0]), args[1]))))
     elif command == "fresh":
         check_fresh(Path(args[0]).absolute())
     elif command == "collect":

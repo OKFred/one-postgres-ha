@@ -1,6 +1,6 @@
 # one-postgres-ha
 
-三台同构专用 Linux AMD64 或 ARM64 服务器上的 PostgreSQL 17 高可用部署工具。
+至少三台同构专用 Linux AMD64 或 ARM64 服务器上的 PostgreSQL 17 高可用部署工具。
 使用 Bash 命令入口、Ansible 配置部署和 Docker Compose 容器。
 
 源码采用 [MIT](LICENSE)。第三方组件保留各自许可证，见 [THIRD_PARTY.md](THIRD_PARTY.md)。
@@ -10,7 +10,7 @@
 
 | 项目 | 范围 |
 | --- | --- |
-| 部署架构 | 全 AMD64 或全 ARM64 Linux，三个核心节点及同架构新增 PG 副本；不支持混合架构集群 |
+| 部署架构 | 全 AMD64 或全 ARM64 Linux，至少三个 PG 节点，可选择 etcd 成员；不支持混合架构集群 |
 | 宿主工具自动安装 | Debian 13 AMD64／ARM64；其他系统需自行准备并验收 |
 | 网络与存储 | 核心节点在同一直接相连网络；各自本地 SSD；独占硬件 watchdog |
 | 测试 | AMD64、ARM64 隔离 CI；现场故障验收单独记录 |
@@ -23,15 +23,15 @@ etcd 使用双向 TLS；PostgreSQL 和 Patroni 管理 API 当前未启用 TLS，
 ## 服务
 
 - PostgreSQL 17.11＋Patroni 4.1.5，严格同步一个备库。
-- 三成员 etcd 3.6.15，客户端和成员通信使用双向 TLS。
-- HAProxy 根据 Patroni 的主库状态转发，Keepalived 在三台宿主机间迁移内网 VIP。
+- etcd 3.6.15，默认选择不超过 7 台的最大奇数成员，客户端和成员通信使用双向 TLS。
+- HAProxy 根据 Patroni 的主库状态转发，Keepalived 在所选核心节点的宿主机间迁移内网 VIP。
 - 数据各自存放在本地 SSD，备份写到独立服务器。
 
 可以用 `backup_target.enabled: false` 先建设空集群，此时不连接备份服务器，也不安装备份定时任务。
 接入业务前须配置独立备份目标并通过恢复演练。
 
-根目录的 docker-compose.yml 是实际部署文件。三个核心节点共用它，各自使用生成的 .env 和配置；
-新增节点默认只运行 PostgreSQL＋Patroni。
+根目录的 docker-compose.yml 是实际部署文件。所有节点共用它，各自使用生成的 .env 和配置；
+核心节点运行 etcd 和入口代理，其余节点只运行 PostgreSQL＋Patroni。
 
 ## 准备与启动
 
@@ -61,11 +61,14 @@ bash install.sh
 
 下载源支持自动选择，也可在菜单 `09` 中手动指定官方、中科大或清华源。
 首次交互配置或构建工具镜像时，自动模式用 curl 检查实际 HTTPS 请求，再比较多轮小请求耗时，
-不依赖 ping。选择保存在忽略的 `.local/download-source`，后续复用，不反复测速。
+不依赖 ping。只把选中的源名称保存在忽略的 `.local/download-source`，后续复用，不反复测速；
+历史测速耗时不参与之后的选择。菜单 `09` 显示当前保存状态，`1` 总是重新测速，`6` 清除已保存选择。
+每次测速都会显示各来源的可用状态、成功／尝试轮数和本轮耗时中位数，再显示最终选择。
 已有 inventory 或非交互执行且没有下载源配置时继续使用官方源。需要重新测速或手动切换时运行：
 
 ```bash
 bash ops.sh sources auto       # 重新测速并保存
+bash ops.sh sources clear      # 清除保存的源选择，不测速
 bash ops.sh sources ustc       # 手动指定中科大，不测速
 bash ops.sh sources --show     # 只查看当前选择
 ```
@@ -78,16 +81,22 @@ bash ops.sh sources --show     # 只查看当前选择
 `INSTALL`；明确执行可用 `bash install.sh --apply`，兼容旧的 `--yes` 别名。
 `--apply` 不跳过配置、主机指纹或预检，`--plan`、`--apply`、`--yes` 不能混用或重复。
 
-向导集中询问三台节点 IP、VIP、SSH 身份和共用 SSD 挂载路径，
+向导要求先填写三台节点 IP，再逐台询问第 4 台及更多节点；可选地址留空后确认停止添加。
+随后确认 etcd 成员、VIP、SSH 身份和共用 SSD 挂载路径，
 只读检测主机、CPU 架构、网卡、Keepalived 版本及控制端管理来源，生成私有配置。
-三台架构必须一致，向导按实际检测保存 `expected_architecture: x86_64` 或 `aarch64`；
+所有节点架构必须一致，向导按实际检测保存 `expected_architecture: x86_64` 或 `aarch64`；
 手工配置应将该字段放在 `all.vars`，供 PG 节点和独立备份主机共同读取；旧 inventory 未填写时继续按 ARM64 检查。
 SSH 指纹须与各主机控制台核对，VIP 须自行预留；确认后才保存。
 默认在节点构建 PostgreSQL 镜像，也可填写预构建镜像的固定 digest。
 备份初始关闭，接入业务前另行配置并验收。
 
+3／4 台节点默认选 3 个 etcd 成员，5／6 台默认选 5 个，7 台以上默认选 7 个。
+向导展示名单、多数派门槛和可容忍故障数，也可按编号选择其他节点；
+偶数成员或超过 7 个成员须额外输入 `FORCE-ETCD`。所选成员同时运行 HAProxy 和 VIP，
+其他 PG 节点仍可成为主库候选。etcd 容错计算及操作边界见 [首次配置向导](docs/configure.md#etcd-成员选择)。
+
 向导只用于首次配置，拒绝覆盖已有 inventory、主机指纹、控制端环境文件及凭据。
-使用私钥时先设置 `HA_SSH_KEY`；默认支持三台共用的 SSH 密码，输入不会显示。
+使用私钥时先设置 `HA_SSH_KEY`；默认支持所有节点共用的 SSH 密码，输入不会显示。
 全部现场输入保存到忽略的 `.local/`。详细说明与手动配置方法见 [首次配置向导](docs/configure.md)。
 
 已有主机保留 Docker、SSD 挂载和 watchdog 的准备工作即可。脚本生成缺少的凭据，
@@ -131,7 +140,7 @@ Keepalived 是宿主机服务，所以完整首次部署需要 ops.sh deploy。
 当前 PG17 镜像需要从本版本源码构建，或由使用者发布后填写固定摘要。
 [预构建镜像记录](PREBUILT-IMAGES.md) 中原有 PG18 摘要仅供旧版追溯，不能用于 PG17 安装。
 
-不需要 Docker Swarm。控制端仍通过 Ansible 在三台服务器上分别运行 Compose，
+不需要 Docker Swarm。控制端仍通过 Ansible 在各台服务器上分别运行 Compose，
 按顺序建立 etcd 仲裁、主库和副本，并配置宿主机 Keepalived 与 watchdog。
 
 默认 `postgres_image_mode: source` 在节点构建 PostgreSQL＋Patroni 镜像。

@@ -35,8 +35,8 @@ bootstrap:
         synchronous_commit: 'on'
         wal_level: replica
         wal_log_hints: 'on'
-        max_wal_senders: 16
-        max_replication_slots: 16
+        max_wal_senders: {{ [16, (groups.pg_nodes | length) + 2] | max }}
+        max_replication_slots: {{ [16, (groups.pg_nodes | length) + 1] | max }}
         max_slot_wal_keep_size: 4GB
         wal_keep_size: 1GB
         max_connections: 100

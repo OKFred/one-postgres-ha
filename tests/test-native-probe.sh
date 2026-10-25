@@ -65,6 +65,31 @@ with unittest.mock.patch.object(probe, 'require_apply'), \
     close.assert_called_once_with(42)
 result = subprocess.run([sys.executable, str(helper), 'snapshot'], capture_output=True, text=True)
 assert result.returncode == 2 and 'snapshot requires --data-mount' in result.stderr
+for count in [3, 4, 5, 7, 8]:
+    addresses = [f'192.0.2.{index}' for index in range(1, count + 1)]
+    isolated = types.SimpleNamespace(**vars(args), addresses=addresses, chain=f'PGN_{count:012x}')
+    def command(argv, check=True):
+        return types.SimpleNamespace(returncode=1 if argv[:5] == ['iptables', '-w', '5', '-S', isolated.chain] else 0)
+    with unittest.mock.patch.object(probe, 'require_apply'), \
+         unittest.mock.patch.object(probe, 'STATE', work/'owned-dcs'), \
+         unittest.mock.patch.object(probe, 'run', side_effect=command) as run:
+        assert probe.dcs_isolate(isolated)['status'] == 'dcs_client_egress_isolated'
+        commands = [call.args[0] for call in run.call_args_list]
+        targets = [argv[6] for argv in commands if argv[:5] == ['iptables', '-w', '5', '-A', isolated.chain]]
+        assert set(targets) == {address + '/32' for address in addresses + ['127.0.0.1']}
+        assert commands.index(next(argv for argv in commands if argv[0] == 'systemd-run')) < commands.index(
+            ['iptables', '-w', '5', '-N', isolated.chain])
+for addresses in [[], ['192.0.2.1'] * 3, ['192.0.2.1', '192.0.2.2', '127.0.0.1'],
+                  ['192.0.2.1', '192.0.2.2', '224.0.0.1']]:
+    isolated = types.SimpleNamespace(**vars(args), addresses=addresses, chain='PGN_123456abcdef')
+    with unittest.mock.patch.object(probe, 'require_apply'), unittest.mock.patch.object(probe, 'run') as run:
+        try:
+            probe.dcs_isolate(isolated)
+        except RuntimeError as error:
+            assert 'at least three distinct non-loopback' in str(error)
+        else:
+            raise AssertionError('invalid isolation endpoints were accepted')
+        run.assert_not_called()
 print('PASS: native helper syntax, explicit mutation, boot/PID and timer guards')
 PY
 yamllint -c "$ROOT/.yamllint.yml" "$ROOT/tests/native-vip.yml"

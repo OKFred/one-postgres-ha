@@ -110,7 +110,7 @@ Keepalived 应因本地 /ready 失败释放 VIP，另一节点接管。记录原
 
 ## 5. 主库 DCS 客户端出口隔离
 
-先 verify，选择当前主库 `TARGET`，从私有 inventory 取三个核心节点 IPv4 地址。包含自身 node_ip 和 127.0.0.1，不能漏掉本地 etcd 客户端地址。
+先 verify，选择当前主库 `TARGET`，从私有 inventory 取全部核心节点 IPv4 地址。包含自身 node_ip 和 127.0.0.1，不能漏掉本地 etcd 客户端地址。
 
 ```bash
 tool ansible "$TARGET" -m ansible.builtin.command -a \

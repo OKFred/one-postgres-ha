@@ -167,9 +167,11 @@ def dcs_cleanup(args):
 
 def dcs_isolate(args):
     require_apply(args)
-    addresses = sorted({str(ipaddress.IPv4Address(ip)) for ip in args.addresses} | {'127.0.0.1'})
-    if len(addresses) != 4:
-        raise RuntimeError('provide exactly the three core IPv4 addresses')
+    core_addresses = [ipaddress.IPv4Address(ip) for ip in args.addresses]
+    if (len(set(core_addresses)) < 3 or len(set(core_addresses)) != len(core_addresses)
+            or any(ip.is_loopback or ip.is_unspecified or ip.is_multicast for ip in core_addresses)):
+        raise RuntimeError('provide at least three distinct non-loopback core IPv4 addresses')
+    addresses = sorted({str(ip) for ip in core_addresses} | {'127.0.0.1'})
     chain_check = run(['iptables', '-w', '5', '-S', args.chain], check=False).returncode
     if chain_check not in [0, 1]:
         raise RuntimeError('cannot inspect partition chain; no rules changed')

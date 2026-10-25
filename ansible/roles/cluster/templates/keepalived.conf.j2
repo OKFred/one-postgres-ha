@@ -15,7 +15,7 @@ vrrp_instance POSTGRES_HA {
     state BACKUP
     interface {{ network_interface }}
     virtual_router_id {{ vip_router_id }}
-    priority {{ 150 - groups.core_nodes.index(inventory_hostname) * 10 }}
+    priority {{ [1, 150 - groups.core_nodes.index(inventory_hostname) * 10] | max }}
     advert_int 1
     nopreempt
     unicast_src_ip {{ node_ip }}

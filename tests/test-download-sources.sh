@@ -66,6 +66,7 @@ printf '%s\n' "$count" >"$state"
 code=200
 case "$SOURCES_MODE" in
   normal) ;;
+  network_changed) [[ $provider != tuna ]] || elapsed=0.001 ;;
   official_unreachable) [[ $provider != official ]] || exit 28 ;;
   wrong_release)
     if [[ $provider == ustc ]]; then printf '<html>not release metadata</html>\n' >"$output"; printf '200 0.001'; exit 0; fi ;;
@@ -89,6 +90,9 @@ case "$SOURCES_MODE" in
       head -c 1048576 /dev/zero >"$output"
       printf '200 0.001'; exit 0
     fi ;;
+  held_initial_probe)
+    : >"$SOURCES_FIXTURE/probe-started-$provider"
+    while [[ ! -e $SOURCES_FIXTURE/release-probe ]]; do sleep 0.01; done ;;
   *) exit 96 ;;
 esac
 if [[ $kind == pypi ]]; then
@@ -108,6 +112,10 @@ expect() { [[ $(<"$WORK/selected") == "$1" ]]; }
 reject() {
   if choose "$@"; then printf 'Unsafe or unavailable selection was accepted\n' >&2; exit 1; fi
 }
+expect_table_row() {
+  local profile=$1 status=$2 rounds=$3 milliseconds=$4
+  grep -Eq "^[[:space:]]*${profile}[[:space:]]+${status}[[:space:]]+${rounds}[[:space:]]+${milliseconds}([[:space:]]|$)" "$WORK/diagnostic"
+}
 
 # Read-only fallback and a blank menu neither build anything nor create private files.
 PHASE=readonly_defaults
@@ -118,6 +126,15 @@ printf '\n' | bash "$SELECTOR" >"$WORK/menu" 2>&1
 [[ ! -e "$PROJECT/.local" ]]
 grep -Fq 'HTTPS' "$WORK/menu"
 grep -Fq '官方源' "$WORK/menu"
+grep -Fq '6. Clear saved selection -- 清除已保存选择' "$WORK/menu"
+grep -Fq '未保存源选择' "$WORK/menu"
+
+# Clearing an unused project does not create private state or contact a source.
+PHASE=clear_unused_project
+choose clear
+choose clear
+printf '6\n\n' | bash "$SELECTOR" >"$WORK/menu" 2>&1
+[[ ! -e "$PROJECT/.local" && ! -e "$WORK/calls" ]]
 
 # Manual selection and later resolves use one data line and never contact the network.
 PHASE=manual_selection
@@ -130,20 +147,77 @@ choose --show; expect tuna
 choose official; expect official
 [[ ! -e "$WORK/calls" ]]
 
+# Clear only the saved profile. Preserve the common lock inode and unrelated
+# private input or reports; repeats remain idempotent and never probe.
+PHASE=clear_saved_selection
+lock_identity=$(stat -c '%d:%i' "$PROJECT/.local/download-source.lock")
+printf 'private configuration sentinel\n' >"$PROJECT/.local/keep-config"
+mkdir "$PROJECT/.local/reports"
+printf '{"fixture":"report sentinel"}\n' >"$PROJECT/.local/reports/keep.json"
+choose clear
+[[ ! -e $CACHE && ! -e "$WORK/calls" ]]
+[[ $(stat -c '%d:%i' "$PROJECT/.local/download-source.lock") == "$lock_identity" ]]
+[[ $(<"$PROJECT/.local/keep-config") == 'private configuration sentinel' ]]
+[[ $(<"$PROJECT/.local/reports/keep.json") == '{"fixture":"report sentinel"}' ]]
+choose clear
+choose --show; expect official
+choose --resolve saved; expect official
+[[ ! -e $CACHE && ! -e "$WORK/calls" ]]
+choose tuna
+reject clear unexpected
+[[ $(<"$CACHE") == tuna ]]
+
+# The menu remains usable when the cached bytes are invalid or too large.
+# Clearing is metadata-guarded, not dependent on parsing those bytes first.
+PHASE=clear_malformed_selection
+for malformed in '$(touch injected)' $'tuna\nextra\n'; do
+  printf '%s' "$malformed" >"$CACHE"
+  printf '6\n\n' | bash "$SELECTOR" >"$WORK/menu" 2>&1
+  [[ ! -e $CACHE && ! -e "$PROJECT/injected" && ! -e "$WORK/calls" ]]
+  grep -Fq '已保存选择无效或不可读' "$WORK/menu"
+  grep -Fq '未保存源选择' "$WORK/menu"
+done
+head -c 1024 /dev/zero >"$CACHE"
+choose clear
+[[ ! -e $CACHE && ! -e "$WORK/calls" ]]
+mkdir "$CACHE"
+reject clear
+[[ -d $CACHE ]]
+rmdir "$CACHE"
+
 # Explicit auto always remeasures; complete HTTPS metadata determines the winner.
 PHASE=initial_auto_selection
+choose tuna; expect tuna
 choose auto; expect ustc
 [[ $(<"$CACHE") == ustc && $(wc -l <"$WORK/calls") == 36 ]]
 grep -Fq 'median' "$WORK/diagnostic"
+grep -Fq 'HTTPS test results -- HTTPS 测速结果' "$WORK/diagnostic"
+expect_table_row official available 3/3 120
+expect_table_row ustc available 3/3 40
+expect_table_row tuna available 3/3 80
+grep -Fq 'Selected source -- 已选择源：ustc' "$WORK/diagnostic"
 before=$(wc -l <"$WORK/calls")
 choose --resolve auto; expect ustc
 [[ $(wc -l <"$WORK/calls") == "$before" ]]
+
+# Forgetting the selected profile makes a later cached-auto resolve evaluate
+# current requests again. A changed winner is saved, then reused without calls.
+PHASE=clear_then_resolve_after_network_change
+choose clear
+[[ ! -e $CACHE && $(wc -l <"$WORK/calls") == "$before" ]]
+SOURCES_MODE=network_changed choose --resolve auto; expect tuna
+[[ $(wc -l <"$WORK/calls") == $((before + 36)) && $(<"$CACHE") == tuna ]]
+expect_table_row tuna available 3/3 4
+after_network_change=$(wc -l <"$WORK/calls")
+choose --resolve auto; expect tuna
+[[ $(wc -l <"$WORK/calls") == "$after_network_change" ]]
 
 # An outlier in one round does not defeat the faster median candidate.
 PHASE=median_outlier
 reset_probe
 SOURCES_MODE=median choose auto; expect official
 [[ $(<"$CACHE") == official ]]
+expect_table_row official available 3/3 20
 for mode in official_unreachable wrong_release wrong_pypi wrong_status malformed_time oversized_body; do
   PHASE=invalid_probe_$mode
   reset_probe
@@ -161,11 +235,17 @@ choose ustc
 reset_probe
 SOURCES_MODE=all_fail reject auto
 [[ $(<"$CACHE") == ustc ]]
+for profile in official ustc tuna; do expect_table_row "$profile" unavailable 0/2 -; done
+reset_probe
 SOURCES_MODE=one_success reject auto
 [[ $(<"$CACHE") == ustc ]]
+expect_table_row official unavailable 1/3 -
+expect_table_row ustc unavailable 0/2 -
+expect_table_row tuna unavailable 0/2 -
 reset_probe
 PHASE=two_successful_rounds
 SOURCES_MODE=two_success choose auto; expect official
+expect_table_row official available 2/3 120
 rm -- "$CACHE"
 SOURCES_MODE=all_fail reject --resolve auto
 [[ ! -e $CACHE ]]
@@ -199,12 +279,14 @@ ln -s "$WORK/outside" "$CACHE"
 reject --show
 reject ustc
 reject auto
+reject clear
 [[ $(<"$WORK/outside") == official && ! -e "$WORK/calls" ]]
 rm -- "$CACHE"
 ln "$WORK/outside" "$CACHE"
 reject official
 reject --show
 reject --resolve saved
+reject clear
 rm -- "$CACHE"
 if [[ $(id -u) == 0 ]]; then
   PHASE=foreign_cache_owner
@@ -212,6 +294,7 @@ if [[ $(id -u) == 0 ]]; then
   chown 1 "$CACHE"
   reject --show
   reject official
+  reject clear
   rm -- "$CACHE"
 fi
 mv -- "$PROJECT/.local" "$PROJECT/private-saved"
@@ -219,13 +302,88 @@ PHASE=linked_private_directory
 ln -s "$PROJECT/private-saved" "$PROJECT/.local"
 reject --show
 reject official
+reject clear
 rm -- "$PROJECT/.local"
 mv -- "$PROJECT/private-saved" "$PROJECT/.local"
 rm -- "$PROJECT/.local/download-source.lock"
 PHASE=linked_lock
 ln -s "$WORK/outside" "$PROJECT/.local/download-source.lock"
 reject official
+reject clear
 rm -- "$PROJECT/.local/download-source.lock"
+
+# An initial auto selection owns the lock before it has published any cache.
+# Clearing must queue behind that operation and remove its eventual result.
+PHASE=clear_waits_for_initial_probe
+reset_probe
+export SOURCE_TEST_REAL_FLOCK
+SOURCE_TEST_REAL_FLOCK=$(command -v flock)
+cat >"$WORK/bin/flock" <<'MOCK'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ -n ${SOURCES_CLEAR_LOCK_NOTIFY:-} ]]; then : >"$SOURCES_CLEAR_LOCK_NOTIFY"; fi
+exec "$SOURCE_TEST_REAL_FLOCK" "$@"
+MOCK
+chmod +x "$WORK/bin/flock"
+(
+  probe_pid='' clear_pid=''
+  finish_probe_test() {
+    local pid
+    : >"$WORK/release-probe"
+    for pid in "$probe_pid" "$clear_pid"; do [[ -z $pid ]] || kill "$pid" 2>/dev/null || true; done
+    for pid in "$probe_pid" "$clear_pid"; do [[ -z $pid ]] || wait "$pid" 2>/dev/null || true; done
+  }
+  trap finish_probe_test EXIT
+  SOURCES_MODE=held_initial_probe bash "$SELECTOR" auto >"$WORK/initial-selected" 2>"$WORK/initial-diagnostic" &
+  probe_pid=$!
+  for ((attempt=0; attempt<500; attempt++)); do
+    [[ ! -e "$WORK/probe-started-official" ]] || break
+    sleep 0.01
+  done
+  [[ -e "$WORK/probe-started-official" && ! -e $CACHE ]]
+  SOURCES_CLEAR_LOCK_NOTIFY="$WORK/clear-lock-attempted" bash "$SELECTOR" clear >"$WORK/clear-selected" 2>"$WORK/clear-diagnostic" &
+  clear_pid=$!
+  for ((attempt=0; attempt<500; attempt++)); do
+    [[ ! -e "$WORK/clear-lock-attempted" ]] || break
+    sleep 0.01
+  done
+  [[ -e "$WORK/clear-lock-attempted" && ! -e $CACHE ]]
+  : >"$WORK/release-probe"
+  wait "$probe_pid"; probe_pid=''
+  wait "$clear_pid"; clear_pid=''
+  [[ $(<"$WORK/initial-selected") == ustc && ! -e $CACHE ]]
+  [[ $(wc -l <"$WORK/calls") == 36 ]]
+)
+rm -- "$WORK/bin/flock"
+reset_probe
+
+# Readers may observe a saved snapshot or the no-saved fallback while clear and
+# manual selection serialize their changes. Neither operation starts a probe.
+PHASE=clear_with_concurrent_readers_and_savers
+choose official
+lock_identity=$(stat -c '%d:%i' "$PROJECT/.local/download-source.lock")
+(
+  writer=''
+  trap '[[ -z $writer ]] || { kill "$writer" 2>/dev/null || true; wait "$writer" 2>/dev/null || true; }' EXIT
+  (
+    for ((round=0; round<15; round++)); do
+      for profile in tuna ustc; do
+        bash "$SELECTOR" --resolve "$profile" >>"$WORK/clear-writer-output" 2>>"$WORK/clear-writer-error"
+        bash "$SELECTOR" clear >>"$WORK/clear-writer-output" 2>>"$WORK/clear-writer-error"
+      done
+    done
+  ) &
+  writer=$!
+  for ((reader=0; reader<75; reader++)); do
+    choose --show
+    case "$(<"$WORK/selected")" in official|ustc|tuna) ;; *) exit 1 ;; esac
+    choose --resolve saved
+    case "$(<"$WORK/selected")" in official|ustc|tuna) ;; *) exit 1 ;; esac
+  done
+  wait "$writer"; writer=''
+)
+[[ ! -e $CACHE && ! -e "$WORK/calls" ]]
+[[ $(stat -c '%d:%i' "$PROJECT/.local/download-source.lock") == "$lock_identity" ]]
 
 # Concurrent writers publish complete valid files; readers never see partial data.
 PHASE=concurrent_cli_writers
@@ -296,4 +454,4 @@ chmod +x "$WORK/bin/stat"
 choose --show; expect official
 [[ -f "$SOURCE_TEST_STAT_HOOK" && $(<"$CACHE") == tuna && ! -e "$WORK/calls" ]]
 choose --show; expect tuna
-printf 'PASS: HTTPS source selection, robust medians, bounded probes, cache reuse, manual overrides and concurrent atomic cache publication/readers\n'
+printf 'PASS: HTTPS source timing tables, cache reuse/reset, lock-safe clear, strict inputs and concurrent atomic publication/readers\n'
