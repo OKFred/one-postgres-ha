@@ -35,15 +35,21 @@ check_cache_file() {
     && $(stat -c %s -- "$CACHE") -le 32 ]] || die 'Unsafe saved source file -- 保存的源文件不安全'
 }
 read_cache() {
-  local -a lines=()
+  local snapshot
   check_private
   if [[ ! -e $CACHE && ! -L $CACHE ]]; then return 1; fi
   check_cache_file
-  mapfile -t lines <"$CACHE"
-  [[ ${#lines[@]} == 1 ]] && profile_valid "${lines[0]}" || die 'Invalid saved source value; select a source again -- 保存值无效，请重新选择'
-  # Bash strings cannot retain NUL. Compare the exact expected bytes as well.
-  cmp -s -- "$CACHE" <(printf '%s\n' "${lines[0]}") || die 'Saved source must contain exactly one profile and LF -- 保存值须为单个源名称及换行'
-  SAVED_SOURCE=${lines[0]}
+  # Read one bounded byte snapshot. A writer may atomically replace the path
+  # between reads, so separate parsing/comparison opens could disagree even
+  # when both versions are valid. Hex retains NUL/CR/LF that Bash would strip.
+  snapshot=$(od -An -v -tx1 -N 33 -- "$CACHE" | tr -d '[:space:]') || die 'Cannot read saved source -- 无法读取已保存源'
+  # Exact ASCII bytes of official/ustc/tuna followed by one LF (0a).
+  case "$snapshot" in
+    6f6666696369616c0a) SAVED_SOURCE=official ;;
+    757374630a) SAVED_SOURCE=ustc ;;
+    74756e610a) SAVED_SOURCE=tuna ;;
+    *) die 'Saved source must contain exactly one known profile and LF -- 保存值须为单个已知源名称及换行' ;;
+  esac
 }
 lock_cache() {
   local lock="$ROOT/.local/download-source.lock"

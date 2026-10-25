@@ -206,4 +206,30 @@ for pid in "${pids[@]}"; do wait "$pid"; done
 [[ $(wc -l <"$CACHE") == 1 && $(stat -c %a "$CACHE") == 600 ]]
 [[ -z $(find "$PROJECT/.local" -maxdepth 1 -name 'download-source.*' ! -name 'download-source.lock' -print) ]]
 [[ ! -e "$WORK/calls" ]]
-printf 'PASS: HTTPS source selection, robust medians, bounded probes, cache reuse, manual overrides and atomic private persistence\n'
+
+# Repeatedly publish complete valid files while readers open the cache. Each
+# reader may see either valid version; replacement must never look like damage.
+(
+  writer=''
+  trap '[[ -z $writer ]] || { kill "$writer" 2>/dev/null || true; wait "$writer" 2>/dev/null || true; }' EXIT
+  for ((round=0; round<3; round++)); do
+    (
+      umask 077
+      for ((replacement=0; replacement<300; replacement++)); do
+        for profile in official ustc tuna; do
+          printf '%s\n' "$profile" >"$PROJECT/.local/atomic-swap"
+          mv -fT -- "$PROJECT/.local/atomic-swap" "$CACHE"
+        done
+      done
+    ) &
+    writer=$!
+    for ((reader=0; reader<100; reader++)); do
+      choose --show
+      case "$(<"$WORK/selected")" in official|ustc|tuna) ;; *) exit 1 ;; esac
+    done
+    wait "$writer"
+    writer=''
+  done
+)
+[[ ! -e "$WORK/calls" && ! -e "$PROJECT/.local/atomic-swap" ]]
+printf 'PASS: HTTPS source selection, robust medians, bounded probes, cache reuse, manual overrides and concurrent atomic cache publication/readers\n'
