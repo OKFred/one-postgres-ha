@@ -22,6 +22,36 @@ bash install.sh
 向导复用现有工具镜像，缺少时构建或拉取。它不安装目标主机工具、不格式化磁盘、不部署服务。
 初始关闭独立备份；接入业务前仍须配置备份目标并通过恢复演练。
 
+## 下载源选择
+
+工具镜像可能在向导显示前就需要构建，因此下载源在控制端先选择。
+首次交互配置或工具构建使用自动模式，通过 curl 检查 HTTPS 可用性和多轮小请求耗时，
+从官方、中科大、清华源中选择可用来源并保存；不要求镜像站响应 ping。
+已有 `.local/download-source` 时直接复用；已有 inventory 或非交互执行且没有源配置时保留官方源。
+
+在菜单选择 `09. Download sources -- 下载源与测速`，或直接运行：
+
+```bash
+bash ops.sh sources            # 交互选择自动测速或手动来源
+bash ops.sh sources auto       # 显式重新测速
+bash ops.sh sources official   # 手动指定官方源
+bash ops.sh sources ustc       # 手动指定中科大
+bash ops.sh sources tuna       # 手动指定清华
+bash ops.sh sources --show     # 只读查看
+```
+
+首次运行也可在工具构建前指定：
+
+```bash
+HA_DOWNLOAD_SOURCE=tuna bash ops.sh configure
+```
+
+这里的手动环境变量只覆盖本次操作，不改写保存值。需要保存手动选择时用 `bash ops.sh sources tuna`。
+
+选择只影响后续下载与构建，不会重启现有容器或更改宿主机全局 APT 源。
+测速发生在控制端，不能保证它也是每台节点的大文件下载最快来源。
+范围、缓存与连接失败处理见 [下载源与自动测速](download-sources.md)。
+
 ## 输入和确认
 
 向导需要以下输入，并展示检测结果：
@@ -76,6 +106,7 @@ bash ops.sh configure
   inventory.yml           # 节点、网络、SSD、镜像和 SSH 身份引用
   known_hosts             # 经你核对的三台主机公钥
   controller.env          # 控制端镜像与 SSH 私钥路径（如使用）
+  download-source         # 已选下载源：official、ustc 或 tuna
   secrets/
     ssh-password          # 仅在密码登录模式生成，权限 0600
 ```
@@ -84,6 +115,7 @@ bash ops.sh configure
 `configure` 不生成数据库密码和 CA，安装入口会生成缺少的凭据并保留已有值。
 `ops.sh` 自动读取 `controller.env` 中的镜像及私钥路径，无需每次手动 export 或 source。
 当前终端显式设置的 `HA_TOOLS_IMAGE`、`HA_SSH_KEY` 优先于保存值。
+下载源独立读取 `.local/download-source`；显式 `HA_DOWNLOAD_SOURCE` 可在本次入口选择来源。
 
 ## 预构建镜像与私有仓库
 

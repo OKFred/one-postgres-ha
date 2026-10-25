@@ -79,6 +79,9 @@ source.mkdir(parents=True)
     'ansible_python_interpreter':'{{ ansible_playbook_python }}'}}}}))
 valid = 'registry.example.com/ha/postgres@sha256:'+'a'*64
 cases = [('source_default','source','',True,'build'),
+         ('source_ustc','source','',True,'build'),
+         ('source_tuna','source','',True,'build'),
+         ('bad_download_source','source','',False,None),
          ('source_tag','source','custom-ha:v1',True,'build'),
          ('prebuilt','prebuilt',valid,True,'pull'),
          ('prebuilt_port','prebuilt','localhost:5000/ha/postgres:v1@sha256:'+'b'*64,True,'pull'),
@@ -94,7 +97,9 @@ for name, mode, image, accepted, action in cases:
     directory.mkdir()
     play = [dict(name='Exercise production image preparation',hosts='fixture',gather_facts=False,
         vars=dict(project_root=str(work/'source'),deployment_root=str(directory),
-            postgres_image_mode=mode,postgres_ha_image=image),
+            postgres_image_mode=mode,postgres_ha_image=image,
+            download_source={'source_ustc': 'ustc', 'source_tuna': 'tuna',
+                             'bad_download_source': 'auto'}.get(name, 'official')),
         tasks=[dict(name='Execute image preparation',**{'ansible.builtin.include_role':dict(
             name='cluster',tasks_from='prepare-image')})])]
     (work/(name+'.yml')).write_text(yaml.safe_dump(play))
@@ -105,7 +110,7 @@ template = Environment(undefined=StrictUndefined).from_string(
 for name, mode, image, accepted, action in cases:
     if not accepted:
         continue
-    variables = dict(defaults,postgres_image_mode=mode,postgres_ha_image=image,
+    variables = dict(defaults,postgres_image_mode=mode,postgres_ha_image=image,download_source='ustc',
         project_root=str(root),inventory_hostname='fixture',groups={'core_nodes':['fixture']},
         node_name='fixture',node_ip='192.0.2.11',data_root='/mnt/test/one-postgres-ha')
     variables['lookup'] = lambda plugin, path: pathlib.Path(path).read_text()
@@ -114,6 +119,7 @@ for name, mode, image, accepted, action in cases:
     assert len(settings)==1, (name,settings)
     expected = image or 'one-postgres-ha:pg17.11-patroni4.1.5'
     assert settings[0]=='POSTGRES_HA_IMAGE='+expected, (name,settings)
+    assert rendered.splitlines().count('HA_DOWNLOAD_SOURCE=ustc') == 1
 # Both initial and online replica deployments must share the production selector.
 deploy = yaml.safe_load((root/'ansible/deploy.yml').read_text())
 assert any(task.get('ansible.builtin.include_role',{}).get('tasks_from')=='prepare-image'

@@ -14,6 +14,7 @@ Usage: bash ops.sh [--inventory FILE] COMMAND [ARGUMENTS]
   install [--plan|--apply]
   uninstall [--plan|--apply] [--keep-data|--purge-data] [--confirm TOKEN]
   package
+  sources [auto|official|ustc|tuna|--show]
 
 Inventory defaults to .local/inventory.yml. Windows: run through WSL.
 preflight/plan read the site; secrets prepares local credentials, never resets them.
@@ -40,6 +41,7 @@ CLEANUP_LEVEL=purge-data
 CONFIRMATION=DELETE-ONE-POSTGRES-HA
 case "$COMMAND" in
   help|-h|--help) usage; exit 0 ;;
+  sources) exec bash "$ROOT/scripts/download-sources.sh" "$@" ;;
   uninstall) exec bash "$ROOT/uninstall.sh" --inventory "$INVENTORY" "$@" ;;
   configure)
     if [[ ${1:-} == --help || ${1:-} == -h ]]; then
@@ -166,6 +168,24 @@ fi
 if [[ "$COMMAND" == install || "$COMMAND" == cleanup ]]; then
   [[ -s "$ROOT/.local/known_hosts" ]] || die 'Missing .local/known_hosts; verify each SSH host fingerprint before installation or cleanup'
 fi
+# Resolve download settings before the first tool build. Explicit environment
+# overrides are transient; the sources command and auto detection save a choice.
+source_request=${HA_DOWNLOAD_SOURCE:-}
+if [[ -z $source_request ]]; then
+  if [[ -e "$ROOT/.local/download-source" || -L "$ROOT/.local/download-source" ]]; then
+    source_request=saved
+  elif [[ ($COMMAND == configure || $COMMAND == tools) && ! -e $INVENTORY && -t 0 && -t 1 ]]; then
+    source_request=auto
+  else
+    source_request=official
+  fi
+fi
+case "$source_request" in
+  official|ustc|tuna) HA_DOWNLOAD_SOURCE=$source_request ;;
+  auto|saved) HA_DOWNLOAD_SOURCE=$(bash "$ROOT/scripts/download-sources.sh" --resolve "$source_request") ;;
+  *) die 'HA_DOWNLOAD_SOURCE must be auto, official, ustc or tuna' ;;
+esac
+export HA_DOWNLOAD_SOURCE
 mkdir -p "$ROOT/.local"
 controller_state() {
   local cid=$1 state containers
@@ -213,7 +233,8 @@ if [[ "$COMMAND" == tools ]] || ! docker image inspect "$TOOLS_IMAGE" >/dev/null
   if [[ "$TOOLS_PREBUILT" == true ]]; then
     docker pull "$TOOLS_IMAGE"
   else
-    docker build --pull=false -f "$ROOT/images/tools/Dockerfile" -t "$TOOLS_IMAGE" "$ROOT"
+    docker build --pull=false --build-arg "DOWNLOAD_SOURCE=$HA_DOWNLOAD_SOURCE" \
+      -f "$ROOT/images/tools/Dockerfile" -t "$TOOLS_IMAGE" "$ROOT"
   fi
 fi
 [[ "$COMMAND" != tools ]] || exit 0
@@ -222,6 +243,7 @@ RUN=(docker run --rm --init --read-only --tmpfs '/tmp:rw,exec,nosuid,size=256m'
   --workdir /workspace
   -e ANSIBLE_LOCAL_TEMP=/tmp/ansible-local
   -e ANSIBLE_HOME=/tmp/ansible-home
+  -e "HA_DOWNLOAD_SOURCE=$HA_DOWNLOAD_SOURCE"
   -e ANSIBLE_CONFIG=/workspace/ansible/ansible.cfg)
 if [[ "$COMMAND" == configure ]]; then
   RUN+=(--interactive --tty -e "HA_CONFIGURE_TOOLS_IMAGE=$TOOLS_IMAGE")

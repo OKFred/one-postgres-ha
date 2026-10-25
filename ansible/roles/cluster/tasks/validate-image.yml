@@ -5,6 +5,11 @@
       - postgres_ha_image is string
     fail_msg: postgres_image_mode must be source or prebuilt, and postgres_ha_image must be a string.
 
+- name: Validate the resolved package source before rendering build settings
+  ansible.builtin.assert:
+    that: download_source in ['official', 'ustc', 'tuna']
+    fail_msg: download_source must be a resolved official, ustc or tuna profile; auto selection runs on the controller.
+
 - name: Require an immutable registry image in prebuilt mode
   ansible.builtin.assert:
     that:

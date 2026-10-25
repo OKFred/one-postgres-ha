@@ -44,7 +44,23 @@ KEY=/etc/apt/keyrings/docker.asc
 MARKER=$(printf 'one-postgres-ha-host-v1\n%s\n%s' "$DOCKER_ROOT" "$CONTAINERD_ROOT")
 DOCKER_JSON=$(printf '{"data-root":"%s","log-driver":"json-file","log-opts":{"max-size":"10m","max-file":"3"}}' "$DOCKER_ROOT")
 CONTAINERD_TOML=$(printf 'version = 3\nroot = "%s"\nstate = "/run/containerd"' "$CONTAINERD_ROOT")
-REPO_TEXT=$(printf 'Types: deb\nURIs: https://download.docker.com/linux/debian\nSuites: trixie\nComponents: stable\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/docker.asc' "$ARCHITECTURE")
+source "$ROOT/images/postgres/source-profiles.sh"
+download_source=${HA_DOWNLOAD_SOURCE:-}
+if [[ -z $download_source && ( -e "$ROOT/.local/download-source" || -L "$ROOT/.local/download-source" ) ]]; then
+  download_source=$(bash "$ROOT/scripts/download-sources.sh" --resolve saved)
+fi
+download_source=${download_source:-official}
+if [[ $download_source == auto ]]; then
+  if [[ -e "$ROOT/.local/download-source" || -L "$ROOT/.local/download-source" ]]; then
+    download_source=$(bash "$ROOT/scripts/download-sources.sh" --resolve saved)
+  elif [[ $MODE == --apply ]]; then
+    download_source=$(bash "$ROOT/scripts/download-sources.sh" --resolve auto)
+  else
+    die 'Select a download source with ops.sh sources auto before previewing host preparation'
+  fi
+fi
+ha_source_urls "$download_source" || die 'Unsupported download source'
+REPO_TEXT=$(printf 'Types: deb\nURIs: %s/linux/debian\nSuites: trixie\nComponents: stable\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/docker.asc' "$HA_DOCKER_CE_URL" "$ARCHITECTURE")
 SYSTEMD_UNIT_ROOT=/etc/systemd/system
 check_mount_dependencies() {
   local service directory file root expected entry firewall_expected
@@ -128,7 +144,8 @@ for spec in "${PACKAGES[@]}"; do
   installed=$(dpkg-query -W -f='${Version}' "${spec%%=*}" 2>/dev/null || true)
   [[ -z "$installed" || "$installed" == "${spec#*=}" ]] || die 'Existing Docker package versions differ; upgrades and downgrades require manual review'
 done
-printf 'Host package architecture: %s\nDocker data root: %s\ncontainerd data root: %s\nPinned packages: %s\n' "$ARCHITECTURE" "$DOCKER_ROOT" "$CONTAINERD_ROOT" "${PACKAGES[*]}"
+printf 'Host package architecture: %s\nDocker data root: %s\ncontainerd data root: %s\nPinned packages: %s\nDownload source: %s\n' \
+  "$ARCHITECTURE" "$DOCKER_ROOT" "$CONTAINERD_ROOT" "${PACKAGES[*]}" "$download_source"
 [[ "$MODE" == --apply ]] || { printf 'PLAN_ONLY: no files, services, network or disks changed.\n'; exit 0; }
 [[ $(id -u) == 0 ]] || die '--apply requires root'
 if [[ "$OWNED" == true ]] && running_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null); then
@@ -150,7 +167,7 @@ apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl gnupg python3 iproute2 psmisc iptables
 key_file=$(mktemp)
 trap 'rm -f -- "$key_file"' EXIT
-curl --proto '=https' --tlsv1.2 -fsSL https://download.docker.com/linux/debian/gpg -o "$key_file"
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL "$HA_DOCKER_CE_URL/linux/debian/gpg" -o "$key_file"
 key_details=$(gpg --batch --show-keys --with-colons "$key_file")
 fingerprint=$(awk -F: '$1=="fpr" {print $10; exit}' <<<"$key_details")
 [[ "$fingerprint" == "$HOST_DOCKER_GPG_FINGERPRINT" ]] || die 'Docker apt signing key fingerprint does not match the pinned key'

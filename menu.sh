@@ -6,7 +6,7 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 if (($#)); then
   if [[ $# == 1 && ($1 == --help || $1 == -h) ]]; then
     printf '%s\n' 'Usage: bash menu.sh [--help] -- 用法：bash menu.sh [--help]' \
-      'PostgreSQL operations: configure, install, status, verify, nodes, backup and uninstall -- PostgreSQL 运维菜单：配置、安装、状态、验收、节点、备份、卸载。' \
+      'PostgreSQL operations: configure, install, status, verify, nodes, backup, uninstall and download sources -- PostgreSQL 运维菜单：配置、安装、状态、验收、节点、备份、卸载和下载源。' \
       'Run on the controller; use .local/ from this project or existing HA_INVENTORY -- 在控制端运行；配置沿用本项目 .local/，也支持既有 HA_INVENTORY。' \
       'Press Enter with no selection to exit any menu; 0 returns from a submenu -- 主菜单和子菜单直接回车退出；子菜单输入 0 返回。' \
       'Installation and removal require the original confirmation tokens -- 安装和卸载仍需原入口确认；菜单不会自动填写确认令牌。'
@@ -164,6 +164,7 @@ while true; do
     '06. Backup and restore -- 备份与恢复' \
     '07. Uninstall -- 卸载' \
     '08. Command help -- 命令帮助' \
+    '09. Download sources -- 下载源与测速' \
     '00. Exit -- 退出'
   ask 'Choose an option (Enter to exit) -- 请选择（直接回车退出）：'
   case "$answer" in
@@ -176,6 +177,7 @@ while true; do
     6|06) backup_menu ;;
     7|07) uninstall_menu ;;
     8|08) run ops.sh help ;;
+    9|09) run ops.sh sources ;;
     0|00) exit 0 ;;
     *) printf 'Invalid option; choose again -- 输入有误，请重新选择。\n' ;;
   esac

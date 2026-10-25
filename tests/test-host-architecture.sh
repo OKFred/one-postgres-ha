@@ -23,14 +23,20 @@ dpkg() {
   printf '%s\n' "$TEST_ARCHITECTURE"
 }
 
-for TEST_ARCHITECTURE in amd64 arm64; do
+# Test the real source expression with each supported provider and architecture.
+source "$ROOT/images/postgres/source-profiles.sh"
+for provider in official ustc tuna; do
+  ha_source_urls "$provider"
+  for TEST_ARCHITECTURE in amd64 arm64; do
   (
     source "$WORK/detect.sh"
     [[ $ARCHITECTURE == "$TEST_ARCHITECTURE" ]]
     grep -Fxq "Architectures: $TEST_ARCHITECTURE" <<<"$REPO_TEXT"
     grep -Fxq 'Suites: trixie' <<<"$REPO_TEXT"
     grep -Fxq 'Signed-By: /etc/apt/keyrings/docker.asc' <<<"$REPO_TEXT"
+    grep -Fxq "URIs: $HA_DOCKER_CE_URL/linux/debian" <<<"$REPO_TEXT"
   )
+  done
 done
 
 for TEST_ARCHITECTURE in i386 armhf riscv64 ppc64el '' 'amd64 arm64'; do

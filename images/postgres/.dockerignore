@@ -5,3 +5,4 @@
 !entrypoint.sh
 !healthcheck.sh
 !pg-admin.sh
+!source-profiles.sh

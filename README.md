@@ -40,7 +40,7 @@ etcd 使用双向 TLS；PostgreSQL 和 Patroni 管理 API 当前未启用 TLS，
 需要清理旧 PG18 时使用对应的旧版源码。版本边界、工具镜像更新和 Supabase 迁移准备见
 [PG17 与数据迁移](docs/postgres17.md)。
 
-控制端需要 Bash、Docker、flock、Git。Windows 使用 WSL，并启用 Docker Desktop 对该发行版的集成。
+控制端需要 Bash、Docker、flock、Git；自动下载源测速还需要 curl。Windows 使用 WSL，并启用 Docker Desktop 对该发行版的集成。
 目标服务器需要 Docker Compose、Python 3、现有 SSD 挂载和可独占使用的 watchdog。
 
 Debian 13 AMD64／ARM64 首次缺少 Docker 时，在目标机器上先运行：
@@ -58,6 +58,21 @@ Debian 13 AMD64／ARM64 首次缺少 Docker 时，在目标机器上先运行：
 bash ops.sh configure
 bash install.sh
 ```
+
+下载源支持自动选择，也可在菜单 `09` 中手动指定官方、中科大或清华源。
+首次交互配置或构建工具镜像时，自动模式用 curl 检查实际 HTTPS 请求，再比较多轮小请求耗时，
+不依赖 ping。选择保存在忽略的 `.local/download-source`，后续复用，不反复测速。
+已有 inventory 或非交互执行且没有下载源配置时继续使用官方源。需要重新测速或手动切换时运行：
+
+```bash
+bash ops.sh sources auto       # 重新测速并保存
+bash ops.sh sources ustc       # 手动指定中科大，不测速
+bash ops.sh sources --show     # 只查看当前选择
+```
+
+源选择用于后续软件包下载和镜像构建，保留版本、签名、TLS 与依赖哈希检查；
+已有宿主机的全局 APT 配置保持原样。容器镜像拉取仍需可访问对应 Registry，
+可使用自己的 Registry 固定摘要镜像。完整范围与命令见 [下载源与自动测速](docs/download-sources.md)。
 
 三个项目统一使用根目录 `install.sh`、`uninstall.sh`。`bash install.sh` 需要交互输入
 `INSTALL`；明确执行可用 `bash install.sh --apply`，兼容旧的 `--yes` 别名。
@@ -204,7 +219,7 @@ bash uninstall.sh --apply --purge-data --confirm DELETE-ONE-POSTGRES-HA
 bash menu.sh
 ```
 
-菜单包含配置、安装预览／执行、状态、验收、节点维护、全实例备份、隔离恢复和两档卸载。
+菜单包含配置、安装预览／执行、状态、验收、节点维护、全实例备份、隔离恢复、两档卸载和下载源选择。
 安装仍需输入 `INSTALL`；卸载仍需原入口要求的确认令牌，菜单不代填。
 新增副本、切主、备份与恢复演练需额外输入 `APPLY`，操作失败后显示退出码并返回菜单。
 菜单可从其他工作目录启动，默认使用本项目 `.local/`；显式设置 `HA_INVENTORY` 时沿用既有行为。
