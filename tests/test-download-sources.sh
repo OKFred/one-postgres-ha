@@ -203,7 +203,17 @@ reject auto
 rm -- "$CACHE"
 ln "$WORK/outside" "$CACHE"
 reject official
+reject --show
+reject --resolve saved
 rm -- "$CACHE"
+if [[ $(id -u) == 0 ]]; then
+  PHASE=foreign_cache_owner
+  printf 'official\n' >"$CACHE"
+  chown 1 "$CACHE"
+  reject --show
+  reject official
+  rm -- "$CACHE"
+fi
 mv -- "$PROJECT/.local" "$PROJECT/private-saved"
 PHASE=linked_private_directory
 ln -s "$PROJECT/private-saved" "$PROJECT/.local"
@@ -260,4 +270,30 @@ for pid in "${pids[@]}"; do wait "$pid"; done
   done
 )
 [[ ! -e "$WORK/calls" && ! -e "$PROJECT/.local/atomic-swap" ]]
+
+# Force an atomic replacement after a reader has opened its snapshot but before
+# metadata validation. The old inode is now unlinked, yet its complete value
+# must remain readable; rereading the path would incorrectly see the new value.
+PHASE=held_snapshot_after_replacement
+choose official
+export SOURCE_TEST_REAL_STAT SOURCE_TEST_CACHE="$CACHE" SOURCE_TEST_STAT_HOOK="$WORK/stat-hook"
+SOURCE_TEST_REAL_STAT=$(command -v stat)
+cat >"$WORK/bin/stat" <<'MOCK'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+for argument in "$@"; do
+  if [[ $argument =~ ^/proc/[0-9]+/fd/[0-9]+$ && ! -e $SOURCE_TEST_STAT_HOOK ]]; then
+    umask 077
+    printf 'tuna\n' >"$SOURCE_TEST_CACHE.swap"
+    mv -fT -- "$SOURCE_TEST_CACHE.swap" "$SOURCE_TEST_CACHE"
+    printf 'replaced\n' >"$SOURCE_TEST_STAT_HOOK"
+    break
+  fi
+done
+exec "$SOURCE_TEST_REAL_STAT" "$@"
+MOCK
+chmod +x "$WORK/bin/stat"
+choose --show; expect official
+[[ -f "$SOURCE_TEST_STAT_HOOK" && $(<"$CACHE") == tuna && ! -e "$WORK/calls" ]]
+choose --show; expect tuna
 printf 'PASS: HTTPS source selection, robust medians, bounded probes, cache reuse, manual overrides and concurrent atomic cache publication/readers\n'

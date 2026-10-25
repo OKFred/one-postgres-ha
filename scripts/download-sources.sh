@@ -35,14 +35,24 @@ check_cache_file() {
     && $(stat -c %s -- "$CACHE") -le 32 ]] || die 'Unsafe saved source file -- 保存的源文件不安全'
 }
 read_cache() {
-  local snapshot
+  local snapshot cache_fd cache_object metadata cache_owner cache_links cache_size
   check_private
   if [[ ! -e $CACHE && ! -L $CACHE ]]; then return 1; fi
-  check_cache_file
-  # Read one bounded byte snapshot. A writer may atomically replace the path
-  # between reads, so separate parsing/comparison opens could disagree even
-  # when both versions are valid. Hex retains NUL/CR/LF that Bash would strip.
-  snapshot=$(od -An -v -tx1 -N 33 -- "$CACHE" | tr -d '[:space:]') || die 'Cannot read saved source -- 无法读取已保存源'
+  [[ -f $CACHE && ! -L $CACHE ]] || die 'Invalid saved source file -- 保存的源文件无效'
+  exec {cache_fd}<"$CACHE" || die 'Cannot open saved source -- 无法打开已保存源'
+  cache_object="/proc/$BASHPID/fd/$cache_fd"
+  # Linux /proc lets metadata checks and the bounded read share one held inode.
+  # Atomic publication may unlink that inode after open (links=0); additional
+  # hard links remain unsafe. Writer checks stay strict under their file lock.
+  [[ -f $cache_object ]] || die 'Invalid saved source object -- 保存的源文件对象无效'
+  metadata=$(stat -Lc '%u %h %s' -- "$cache_object") || die 'Cannot inspect saved source -- 无法检查已保存源'
+  [[ $metadata =~ ^([0-9]+)' '([0-9]+)' '([0-9]+)$ ]] || die 'Invalid saved source metadata -- 保存的源文件元数据无效'
+  cache_owner=${BASH_REMATCH[1]} cache_links=${BASH_REMATCH[2]} cache_size=${BASH_REMATCH[3]}
+  [[ $cache_owner == "$(id -u)" && $cache_links -le 1 && $cache_size -le 32 ]] || die 'Unsafe saved source file -- 保存的源文件不安全'
+  # Hex retains NUL/CR/LF that Bash strings would strip; 33 bytes also rejects a
+  # file growing beyond the allowed size without reading an unbounded payload.
+  snapshot=$(od -An -v -tx1 -N 33 <&"$cache_fd" | tr -d '[:space:]') || die 'Cannot read saved source -- 无法读取已保存源'
+  exec {cache_fd}<&-
   # Exact ASCII bytes of official/ustc/tuna followed by one LF (0a).
   case "$snapshot" in
     6f6666696369616c0a) SAVED_SOURCE=official ;;
