@@ -79,6 +79,14 @@ grep -q -- '--label org.opencontainers.image.version=pg17.11-' "$PUBLISH_LOG"
 grep -q PUBLISH_COMPLETE "$WORK/output"
 grep -q 'postgres_ha_image=registry.example.com/team/one-postgres-ha@sha256:' "$WORK/output"
 [[ -z $(find "$PROJECT/.local/publish" -type d -name context -print -quit) ]]
+: >"$PUBLISH_LOG"
+HA_DOWNLOAD_SOURCE=ustc bash "$PROJECT/scripts/publish-images.sh" "$PREFIX" --push >"$WORK/output"
+[[ $(grep -c -- '--build-arg DOWNLOAD_SOURCE=ustc' "$PUBLISH_LOG") == 2 ]]
+grep -q '^download_source=ustc$' "$WORK/output"
+for invalid in '$(touch injected)' 'auto;touch injected' 'https://example.com'; do
+  if HA_DOWNLOAD_SOURCE="$invalid" bash "$PROJECT/scripts/publish-images.sh" "$PREFIX" >"$WORK/output" 2>&1; then exit 1; fi
+  [[ ! -e "$PROJECT/injected" ]]
+done
 export PUBLISH_FAIL_TOOLS=true
 expect_failure "$PREFIX" --push
 ! grep -q PUBLISH_COMPLETE "$WORK/output"

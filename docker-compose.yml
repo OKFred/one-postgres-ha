@@ -13,6 +13,7 @@ services:
       context: ./images/postgres
       provenance: disabled=true
       args:
+        DOWNLOAD_SOURCE: ${HA_DOWNLOAD_SOURCE:-official}
         POSTGRES_BASE_IMAGE: ${POSTGRES_BASE_IMAGE:-postgres:17.11-bookworm@sha256:858bb5e98eed02eb8cafbcdc007f9a65d1b613972028944a8ec2133ccaf80d27}
     network_mode: host
     user: "999:999"

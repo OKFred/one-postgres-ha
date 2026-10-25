@@ -47,7 +47,16 @@ REV=${COMMIT:0:12}
 PG_IMAGE="$PREFIX/one-postgres-ha:pg$POSTGRES_VERSION-patroni$PATRONI_VERSION-$REV"
 TOOLS_IMAGE="$PREFIX/one-postgres-ha-tools:pg$POSTGRES_VERSION-$REV"
 PLATFORMS=linux/amd64,linux/arm64
-printf 'source_commit=%s\nplatforms=%s\npostgres=%s\ntools=%s\nmode=%s\n' "$COMMIT" "$PLATFORMS" "$PG_IMAGE" "$TOOLS_IMAGE" "$MODE"
+DOWNLOAD_SOURCE=${HA_DOWNLOAD_SOURCE:-}
+if [[ -z $DOWNLOAD_SOURCE ]]; then
+  DOWNLOAD_SOURCE=official
+  if [[ -e "$ROOT/.local/download-source" || -L "$ROOT/.local/download-source" ]]; then
+    DOWNLOAD_SOURCE=$(bash "$ROOT/scripts/download-sources.sh" --resolve saved)
+  fi
+fi
+case "$DOWNLOAD_SOURCE" in auto|official|ustc|tuna) ;; *) die 'HA_DOWNLOAD_SOURCE must be auto, official, ustc or tuna' ;; esac
+printf 'source_commit=%s\nplatforms=%s\npostgres=%s\ntools=%s\nmode=%s\ndownload_source=%s\n' \
+  "$COMMIT" "$PLATFORMS" "$PG_IMAGE" "$TOOLS_IMAGE" "$MODE" "$DOWNLOAD_SOURCE"
 if [[ $MODE == plan ]]; then
   printf 'Only committed image files will be published. Run with --push after Docker login.\n'
   exit 0
@@ -75,6 +84,10 @@ check_absent() {
 }
 check_absent "$PG_IMAGE" "$REPORT/postgres-inspect.log"
 check_absent "$TOOLS_IMAGE" "$REPORT/tools-inspect.log"
+if [[ $DOWNLOAD_SOURCE == auto ]]; then
+  DOWNLOAD_SOURCE=$(bash "$ROOT/scripts/download-sources.sh" --resolve auto)
+fi
+printf '%s\n' "$DOWNLOAD_SOURCE" >"$REPORT/download-source"
 mkdir "$CONTEXT"
 # Narrow, committed contexts cannot include .local, .git or untracked credentials.
 git -C "$ROOT" archive "$COMMIT" -- images/postgres images/tools .dockerignore | tar -xf - -C "$CONTEXT"
@@ -84,11 +97,13 @@ COMMON=(--platform "$PLATFORMS" --push --provenance=false --sbom=false
 docker buildx build "${BUILDER[@]}" "${COMMON[@]}" \
   --label "org.opencontainers.image.version=${PG_IMAGE##*:}" \
   --build-arg "POSTGRES_BASE_IMAGE=$POSTGRES_BASE_IMAGE" \
+  --build-arg "DOWNLOAD_SOURCE=$DOWNLOAD_SOURCE" \
   --file "$CONTEXT/images/postgres/Dockerfile" --tag "$PG_IMAGE" \
   --metadata-file "$REPORT/postgres.json" "$CONTEXT/images/postgres"
 docker buildx build "${BUILDER[@]}" "${COMMON[@]}" \
   --label "org.opencontainers.image.version=${TOOLS_IMAGE##*:}" \
   --build-arg "POSTGRES_BASE=$POSTGRES_BASE_IMAGE" \
+  --build-arg "DOWNLOAD_SOURCE=$DOWNLOAD_SOURCE" \
   --file "$CONTEXT/images/tools/Dockerfile" --tag "$TOOLS_IMAGE" \
   --metadata-file "$REPORT/tools.json" "$CONTEXT"
 digest_from_metadata() {

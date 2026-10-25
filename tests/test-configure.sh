@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+# These are offline SSH/wizard fixtures; live source probing is tested separately.
+export HA_DOWNLOAD_SOURCE=official
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 WORK=$(mktemp -d)
 trap 'rm -rf -- "$WORK"' EXIT

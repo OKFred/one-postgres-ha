@@ -65,6 +65,9 @@ expect_calls ''
 
 run_menu $'01\n03\n04\n01\n02\n0\n08\n00\n'
 expect_calls $'ops.sh <configure>\nops.sh <status>\nops.sh <preflight>\nops.sh <verify>\nops.sh <help>\n'
+run_menu $'09\n00\n'
+expect_calls $'ops.sh <sources>\n'
+grep -Fq '09. Download sources -- 下载源与测速' "$work/output"
 run_menu $'2\n1\n2\n0\n7\n1\n2\n3\n4\n0\n0\n'
 expect_calls $'install.sh <--plan>\ninstall.sh\nuninstall.sh <--plan> <--keep-data>\nuninstall.sh <--apply> <--keep-data>\nuninstall.sh <--plan> <--purge-data>\nuninstall.sh <--apply> <--purge-data>\n'
 # Root entries retain their own INSTALL/instance/path confirmations.
