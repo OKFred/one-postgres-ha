@@ -5,7 +5,8 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
 usage() {
   printf '%s\n' 'Usage: bash install.sh [--inventory FILE] [--plan|--apply|--yes]' \
     'Default: configure if needed, then confirm INSTALL before installing.' \
-    '--plan previews without deploying; --apply explicitly approves installation.' \
+    '--plan prepares missing local credentials and previews without changing target hosts.' \
+    '--apply explicitly approves installation.' \
     '--yes is a compatibility alias for --apply; all configuration and SSH checks remain required.'
 }
 mode=''

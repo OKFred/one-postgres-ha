@@ -21,6 +21,7 @@ preflight/plan read the site; secrets prepares local credentials, never resets t
 configure interactively creates fresh private configuration; it never deploys services.
 deploy prepares hosts and starts the cluster; it does not migrate business databases.
 install runs secrets, plan, deploy, status and verify under one lock.
+install --plan prepares missing local credentials, then only inspects target hosts.
 Use install.sh/uninstall.sh for the shared interactive entrypoints.
 uninstall defaults to a keep-data preview.
 USAGE
@@ -342,9 +343,10 @@ run_playbook() {
 if [[ "$COMMAND" == configure ]]; then
   run_tool "$TOOLS_IMAGE" bash scripts/configure.sh
 elif [[ "$COMMAND" == install ]]; then
-  if [[ "$INSTALL_APPLY" == true ]]; then
-    run_tool "$TOOLS_IMAGE" bash scripts/bootstrap-secrets.sh /inventory.yml /workspace/.local/secrets
+  if [[ "$INSTALL_APPLY" == false ]]; then
+    printf '%s\n' 'Preview prepares missing local passwords and certificates; existing values are preserved. Target hosts are only inspected -- 预览会准备缺少的本地密码和证书，保留已有值；目标节点仅作只读检查。'
   fi
+  run_tool "$TOOLS_IMAGE" bash scripts/bootstrap-secrets.sh /inventory.yml /workspace/.local/secrets
   # plan and deploy both include the remote preflight checks.
   run_playbook ansible/plan.yml
   if [[ "$INSTALL_APPLY" == true ]]; then
@@ -353,7 +355,7 @@ elif [[ "$COMMAND" == install ]]; then
     run_playbook ansible/verify.yml
     printf 'INSTALL_COMPLETE: cluster deployed and verified; no business databases migrated.\n'
   else
-    printf 'INSTALL_PLAN_COMPLETE: no credentials or remote services changed.\n'
+    printf 'INSTALL_PLAN_COMPLETE: local credentials ready; no remote services or data changed.\n'
   fi
 elif [[ "$COMMAND" == cleanup ]]; then
   run_playbook "$PLAYBOOK" -e ha_cleanup_apply=false -e "ha_cleanup_level=$CLEANUP_LEVEL"
