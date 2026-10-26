@@ -103,12 +103,15 @@ SSH 指纹须与各主机控制台核对，VIP 须自行预留；确认后才保
 保留已有凭据，运行预检、计划、部署、状态和验收；中途失败立即停止。
 整个安装过程共用一把操作锁。重复执行沿用现有集群，不重置数据库。
 
-只查看安装计划，先准备本地凭据再运行：
+只查看安装计划：
 
 ```bash
-bash ops.sh secrets
 bash install.sh --plan
 ```
+
+安装预览会先在控制端 `.local/secrets/` 生成缺少的密码和证书，保留已有值，再运行完整预检。
+本地准备和预检共用操作锁及同一份 inventory 快照；任一步失败立即停止。
+目标节点只接受检查，不启动服务或修改数据；预览成功后仍需另行执行安装并确认 `INSTALL`，或用 `--apply` 明确批准。
 
 需要分步操作时，原命令仍可用：
 
@@ -120,7 +123,8 @@ bash install.sh --plan
     bash ops.sh status
     bash ops.sh verify
 
-secrets 只生成本地密码及证书，重复执行保留原值。preflight 和 plan 不部署服务。
+`secrets` 只生成本地密码及证书，重复执行保留原值。
+分步使用的 `ops.sh preflight`、`ops.sh plan` 仍需先执行 `ops.sh secrets`；这两个检查命令不会自动生成凭据或部署服务。
 deploy 准备目录、文件权限、专属防火墙规则和宿主 Keepalived，再启动容器；
 业务数据库迁移是独立步骤。第一次不会自动导入原数据库。
 

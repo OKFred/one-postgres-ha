@@ -48,6 +48,25 @@ if [[ ${ENTRY_REQUIRE_LOCK:-false} == true ]]; then
   fi
 fi
 [[ ${ENTRY_FAIL_STAGE:-} != "$stage" ]] || exit 42
+if [[ ${ENTRY_REQUIRE_PRIVATE_INPUTS:-false} == true ]]; then
+  # Model the real preflight dependency, rather than accepting any stage order.
+  # The real bootstrap's full certificate/password idempotence is covered by
+  # test-secrets.sh; this fixture exposes fresh-install orchestration failures.
+  credential="$ENTRY_ROOT/.local/secrets/postgres-password"
+  case "$stage" in
+    secrets)
+      mkdir -p "${credential%/*}"
+      if [[ -e $credential ]]; then
+        [[ -s $credential ]] || exit 44
+      else
+        printf 'entrypoint-credential-fixture\n' >"$credential"
+      fi
+      ;;
+    ansible/plan.yml)
+      [[ -s $credential ]] || { echo 'Required private input is missing' >&2; exit 43; }
+      ;;
+  esac
+fi
 if [[ ${ENTRY_UNCERTAIN_STAGE:-} == "$stage" ]]; then
   # Next controller inspection must block all subsequent steps.
   touch "$ENTRY_UNCERTAIN_FILE"
@@ -55,6 +74,7 @@ fi
 MOCK
 chmod +x "$WORK/bin/docker"
 export PATH="$WORK/bin:$PATH" ENTRY_REQUIRE_LOCK=true
+export ENTRY_REQUIRE_PRIVATE_INPUTS=true
 expect_failure() {
   if bash "$WORK/project/$1" "${@:2}" >"$WORK/output" 2>&1; then
     printf 'Expected failure: %s\n' "$*" >&2
@@ -67,12 +87,48 @@ expect_stages() {
   : >"$ENTRY_LOG"
 }
 
+# A newly configured site has no database credential yet. Preview must prepare
+# it while holding the same operation lock, then inspect without deploying.
+[[ ! -e $WORK/project/.local/secrets/postgres-password ]]
+bash "$WORK/project/install.sh" --plan >"$WORK/output" 2>&1
+expect_stages secrets ansible/plan.yml
+grep -Fq 'Preview prepares missing local passwords and certificates' "$WORK/output"
+grep -Fq 'no remote services or data changed' "$WORK/output"
+[[ -s $WORK/project/.local/secrets/postgres-password ]]
+[[ $(stat -c '%a' "$WORK/project/.local/secrets/postgres-password") == 600 ]]
+
+# Repeat previews retain an operator's existing value. The direct ops entry
+# uses the same preparation/inspection pipeline as install.sh.
+printf 'existing-operator-credential-fixture\n' >"$WORK/project/.local/secrets/postgres-password"
+cp "$WORK/project/.local/secrets/postgres-password" "$WORK/expected-credential"
+bash "$WORK/project/ops.sh" install --plan >"$WORK/output" 2>&1
+expect_stages secrets ansible/plan.yml
+cmp "$WORK/expected-credential" "$WORK/project/.local/secrets/postgres-password"
+
+# The lower-level plan command remains read-only and must not bootstrap inputs.
+export ENTRY_REQUIRE_LOCK=false
+bash "$WORK/project/ops.sh" plan
+expect_stages ansible/plan.yml
+rm -- "$WORK/project/.local/secrets/postgres-password"
+expect_failure ops.sh plan
+expect_stages ansible/plan.yml
+[[ ! -e $WORK/project/.local/secrets/postgres-password ]]
+export ENTRY_REQUIRE_LOCK=true
+
 bash "$WORK/project/install.sh" --apply
 expect_stages secrets ansible/plan.yml ansible/deploy.yml ansible/status.yml ansible/verify.yml
 bash "$WORK/project/install.sh" --yes
 expect_stages secrets ansible/plan.yml ansible/deploy.yml ansible/status.yml ansible/verify.yml
 bash "$WORK/project/install.sh" --plan
-expect_stages ansible/plan.yml
+expect_stages secrets ansible/plan.yml
+
+# Failed local preparation must stop a preview before any Ansible connection.
+export ENTRY_FAIL_STAGE=secrets
+result=0
+bash "$WORK/project/install.sh" --plan >"$WORK/output" 2>&1 || result=$?
+[[ $result == 42 ]]
+expect_stages secrets
+unset ENTRY_FAIL_STAGE
 
 # Stop immediately on preflight/deployment failure; preserve the original exit code.
 export ENTRY_FAIL_STAGE=ansible/plan.yml
@@ -103,6 +159,10 @@ unset ENTRY_FAIL_STAGE
 # A source inventory edit during preview must not change subsequent host targets.
 cp "$WORK/project/.local/inventory.yml" "$WORK/expected-inventory.yml"
 export ENTRY_CHECK_SNAPSHOT=true ENTRY_EXPECTED_INVENTORY="$WORK/expected-inventory.yml"
+bash "$WORK/project/install.sh" --plan
+expect_stages secrets ansible/plan.yml
+cmp "$WORK/project/.local/inventory.yml" <(printf 'changed during preview\n')
+cp "$WORK/expected-inventory.yml" "$WORK/project/.local/inventory.yml"
 bash "$WORK/project/uninstall.sh" --apply --purge-data --confirm DELETE-ONE-POSTGRES-HA
 expect_stages ansible/cleanup.yml:ha_cleanup_apply=false ansible/cleanup.yml:ha_cleanup_apply=true
 cmp "$WORK/project/.local/inventory.yml" <(printf 'changed during preview\n')
@@ -124,7 +184,7 @@ expect_failure uninstall.sh --plan --purge-data
 mv "$WORK/known_hosts" "$WORK/project/.local/known_hosts"
 cp "$WORK/project/.local/inventory.yml" "$WORK/site config.yml"
 bash "$WORK/project/install.sh" --inventory "$WORK/site config.yml" --plan
-expect_stages ansible/plan.yml
+expect_stages secrets ansible/plan.yml
 cp "$WORK/project/.local/inventory.yml" "$WORK/saved-inventory.yml"
 : >"$WORK/project/.local/inventory.yml"
 expect_failure install.sh --apply
@@ -190,4 +250,4 @@ unset ENTRY_FAIL_STAGE
 export ENTRY_REQUIRE_LOCK=false
 bash "$WORK/project/ops.sh" uninstall --plan --keep-data
 expect_stages ansible/cleanup.yml:ha_cleanup_apply=false
-echo 'PASS: common install/uninstall entrypoints, safe defaults, confirmation, shared lock and retries'
+echo 'PASS: common entrypoints, fresh preview preparation, read-only plan, confirmation, shared lock and retries'

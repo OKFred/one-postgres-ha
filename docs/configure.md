@@ -144,7 +144,8 @@ bash ops.sh configure
 ```
 
 真实配置都放在 Git 忽略的 `.local/` 中；不要提交、公开分享或放入镜像构建上下文。
-`configure` 不生成数据库密码和 CA，安装入口会生成缺少的凭据并保留已有值。
+`configure` 不生成数据库密码和 CA；`install.sh`（包括 `--plan`）会先准备缺少的凭据并保留已有值。
+安装预览随后只检查目标主机，实际部署仍需单独执行安装并确认 `INSTALL`，或用 `--apply` 明确批准。
 `ops.sh` 自动读取 `controller.env` 中的镜像及私钥路径，无需每次手动 export 或 source。
 当前终端显式设置的 `HA_TOOLS_IMAGE`、`HA_SSH_KEY` 优先于保存值。
 下载源独立读取 `.local/download-source`；显式 `HA_DOWNLOAD_SOURCE` 可在本次入口选择来源。

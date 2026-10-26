@@ -52,7 +52,7 @@ node_name() {
 install_menu() {
   while true; do
     printf '%s\n' '' 'Install -- 安装' \
-      '1. Preview installation -- 安装预览' \
+      '1. Preview (prepares local credentials) -- 安装预览（准备本地凭据）' \
       '2. Install (requires INSTALL confirmation) -- 执行安装（保留 INSTALL 确认）' \
       '0. Back -- 返回'
     ask 'Choose an option (Enter to exit) -- 请选择（直接回车退出）：'

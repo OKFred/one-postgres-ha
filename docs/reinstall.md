@@ -19,7 +19,7 @@ bash install.sh
 默认在交互终端输入 `INSTALL` 后执行；无配置时先进入本项目向导。
 使用 `bash install.sh --apply` 明确批准安装，`--yes` 为兼容别名。
 这两个参数不跳过配置、SSH 指纹和预检；不能与 `--plan` 混用或重复。
-非交互执行必须传 `--apply` 或 `--yes`。
+非交互实际安装必须传 `--apply` 或 `--yes`。
 
 缺少所选工具镜像时自动构建或拉取，依次执行：
 
@@ -36,12 +36,15 @@ bash install.sh
 预览方式：
 
 ```bash
-bash ops.sh secrets
 bash install.sh --plan
 ```
 
-`--plan` 不生成或轮换凭据，不修改目标主机。
-它仍需要完整的本地凭据供现有预检校验。
+安装预览先在控制端 `.local/secrets/` 准备缺少的密码和证书，保留已有值，不轮换凭据，
+再运行完整预检并展示计划。两步共用操作锁及同一份 inventory 快照；准备失败时不继续预检。
+目标主机只接受检查，不启动服务或修改数据。通过预览后，执行 `bash install.sh` 并确认 `INSTALL`，或显式传入 `--apply` 才开始部署。
+
+单独使用 `bash ops.sh preflight` 或 `bash ops.sh plan` 时，仍需先执行 `bash ops.sh secrets`。
+这两个分步检查入口不自动准备本地凭据。
 
 目标主机须已准备 Docker/Compose、Python 3、可独占 watchdog 和现有 SSD 挂载。
 若 Debian 13 AMD64 或 ARM64 尚无 Docker，先在每台目标主机运行：
